@@ -33,8 +33,24 @@ function canUseStorage() {
 export function getUsers(): DashboardUser[] {
   if (!canUseStorage()) return [defaultAdmin];
 
-  window.localStorage.setItem(USERS_KEY, JSON.stringify([defaultAdmin]));
-  return [defaultAdmin];
+  const savedUsers = window.localStorage.getItem(USERS_KEY);
+  if (!savedUsers) {
+    window.localStorage.setItem(USERS_KEY, JSON.stringify([defaultAdmin]));
+    return [defaultAdmin];
+  }
+
+  try {
+    const users = JSON.parse(savedUsers) as DashboardUser[];
+    const normalizedRoot = rootUsername.trim().toLowerCase();
+    const nonRootUsers = users.filter((user) => user.email.trim().toLowerCase() !== normalizedRoot && user.id !== defaultAdmin.id);
+    const nextUsers = [defaultAdmin, ...nonRootUsers];
+
+    window.localStorage.setItem(USERS_KEY, JSON.stringify(nextUsers));
+    return nextUsers;
+  } catch {
+    window.localStorage.setItem(USERS_KEY, JSON.stringify([defaultAdmin]));
+    return [defaultAdmin];
+  }
 }
 
 function saveUsers(users: DashboardUser[]) {
@@ -69,27 +85,79 @@ export function isRootUser(user: DashboardUser | null | undefined) {
 }
 
 export function inviteUser(name: string, email: string, password: string) {
-  void name;
-  void email;
-  void password;
-  return { ok: false, message: "La plataforma solo permite el usuario ROOT.BWP definido en .env.local." };
+  const users = getUsers();
+  const normalizedEmail = email.trim().toLowerCase();
+
+  if (normalizedEmail === rootUsername.trim().toLowerCase()) {
+    return { ok: false, message: "El usuario root ya existe y no se puede duplicar." };
+  }
+
+  if (users.some((user) => user.email.toLowerCase() === normalizedEmail)) {
+    return { ok: false, message: "Ya existe un usuario registrado con ese correo." };
+  }
+
+  const user: DashboardUser = {
+    id: `USR-${String(users.length + 1).padStart(3, "0")}`,
+    name: name.trim(),
+    email: normalizedEmail,
+    password,
+    role: "Usuario",
+    status: "ACTIVO",
+    createdAt: new Date().toISOString(),
+    lastAccess: "Pendiente de primer acceso",
+  };
+
+  saveUsers([...users, user]);
+  return { ok: true, message: `Usuario ${normalizedEmail} invitado correctamente.`, user };
 }
 
 export function activateInvitedUser(name: string, email: string, temporaryPassword: string, nextPassword: string) {
-  void name;
-  void email;
-  void temporaryPassword;
-  void nextPassword;
-  return { ok: false, message: "La activación de usuarios está deshabilitada. Solo existe el usuario root." };
+  const users = getUsers();
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = users.find((item) => item.email.toLowerCase() === normalizedEmail);
+
+  if (normalizedEmail === rootUsername.trim().toLowerCase()) {
+    return { ok: false, message: "El usuario root se administra desde .env.local." };
+  }
+
+  if (user && user.password !== temporaryPassword && user.lastAccess !== "Pendiente de primer acceso") {
+    return { ok: false, message: "Esta cuenta ya fue activada. Inicia sesión con tu contraseña actual." };
+  }
+
+  const activatedUser: DashboardUser = user
+    ? {
+        ...user,
+        name: name.trim(),
+        password: nextPassword,
+        status: "ACTIVO",
+      }
+    : {
+        id: `USR-${String(users.length + 1).padStart(3, "0")}`,
+        name: name.trim(),
+        email: normalizedEmail,
+        password: nextPassword,
+        role: "Usuario",
+        status: "ACTIVO",
+        createdAt: new Date().toISOString(),
+        lastAccess: "Pendiente de primer acceso",
+      };
+
+  saveUsers(user ? users.map((item) => (item.email.toLowerCase() === normalizedEmail ? activatedUser : item)) : [...users, activatedUser]);
+  return { ok: true, message: "Cuenta activada correctamente. Ya puedes iniciar sesión.", user: activatedUser };
 }
 
 export function changePassword(userId: string, currentPassword: string, nextPassword: string) {
-  void nextPassword;
-  const user = defaultAdmin.id === userId ? defaultAdmin : null;
+  const users = getUsers();
+  const user = users.find((item) => item.id === userId);
 
   if (!user || user.password !== currentPassword) {
     return { ok: false, message: "La contraseña actual no es correcta." };
   }
 
-  return { ok: false, message: "La contraseña del usuario root se administra desde .env.local." };
+  if (isRootUser(user)) {
+    return { ok: false, message: "La contraseña del usuario root se administra desde .env.local." };
+  }
+
+  saveUsers(users.map((item) => (item.id === userId ? { ...item, password: nextPassword } : item)));
+  return { ok: true, message: "Contraseña actualizada correctamente." };
 }
