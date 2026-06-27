@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f3fbff;
+  --foreground: #0f172a;
+  --storeganise-sky: #0ea5e9;
+  --storeganise-sky-soft: #e0f7ff;
+  --storeganise-ink: #0f172a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  letter-spacing: 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  background: #f0f9ff;
+  color: #0369a1;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  padding: 12px;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+td {
+  border-top: 1px solid #e0f2fe;
+  color: #334155;
+  font-size: 14px;
+  padding: 12px;
+  vertical-align: top;
+}
+
+tbody tr {
+  transition: background 140ms ease;
+}
+
+tbody tr:hover {
+  background: #f8fdff;
+}
+
+section {
+  scroll-margin-top: 88px;
+}
+
+main section.rounded-lg {
+  border-color: #bae6fd;
+  box-shadow: 0 12px 30px rgba(2, 132, 199, 0.08);
+}
+
+main section.rounded-lg > div:first-child {
+  border-color: #bae6fd;
+}
+
+@media print {
+  @page {
+    size: letter;
+    margin: 0;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  body:has(.print-page) {
+    width: 8.5in;
+    min-height: 11in;
+    margin: 0 !important;
+    overflow: hidden !important;
+    background: #ffffff !important;
+  }
+
+  body:has(.print-page) > * {
+    visibility: hidden;
+  }
+
+  body:has(.print-page) .print-area,
+  body:has(.print-page) .print-area * {
+    visibility: visible;
+  }
+
+  .print-area {
+    position: fixed !important;
+    inset: 0 !important;
+    display: block !important;
+    width: 8.5in !important;
+    height: 11in !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    background: #ffffff !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+
+  .print-page {
+    width: 8.5in !important;
+    height: 11in !important;
+    min-height: 11in !important;
+    max-height: 11in !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    background: #ffffff !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    padding: 0.38in !important;
+    page-break-after: avoid !important;
+    page-break-inside: avoid !important;
+    break-after: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  .print-page section,
+  .print-page header,
+  .print-page footer,
+  .print-page table,
+  .print-page tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .print-page th,
+  .print-page td {
+    padding: 7px 8px !important;
+    font-size: 11px !important;
+  }
+
+  .print-page h1 {
+    font-size: 28px !important;
+    line-height: 1.05 !important;
+  }
+
+  .print-page h2 {
+    font-size: 20px !important;
+    line-height: 1.15 !important;
+  }
+
+  .print-page h3 {
+    font-size: 15px !important;
+  }
+
+  .print-page p,
+  .print-page span,
+  .print-page strong {
+    font-size: 11px !important;
+    line-height: 1.35 !important;
+  }
+}
