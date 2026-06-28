@@ -15,6 +15,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Roatan Self Storage | Facturación",
   description: "Dashboard de facturación, BAC, CAI y Storeganise",
+  icons: {
+    icon: "/logologin.png",
+    shortcut: "/logologin.png",
+    apple: "/logologin.png",
+  },
 };
 
 export default function RootLayout({
