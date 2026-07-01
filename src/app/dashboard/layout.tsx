@@ -122,13 +122,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const [currentUser, setCurrentUser] = useState<ReturnType<typeof getCurrentUser>>(null);
+  const [isSessionReady, setIsSessionReady] = useState(false);
   const visibleMenu = menu.filter((item) => !item.rootOnly || isRootUser(currentUser));
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => {
+    const validateSession = () => {
+      setIsSessionReady(false);
       const user = getCurrentUser();
 
       if (!user) {
+        setCurrentUser(null);
         router.replace("/login");
         return;
       }
@@ -139,14 +142,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       }
 
       setCurrentUser(user);
-    }, 0);
+      setIsSessionReady(true);
+    };
 
-    return () => window.clearTimeout(timeout);
+    const timeout = window.setTimeout(validateSession, 0);
+    window.addEventListener("pageshow", validateSession);
+
+    return () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("pageshow", validateSession);
+    };
   }, [pathname, router]);
 
   const handleLogout = () => {
     logout();
-    router.push("/login");
+    router.replace("/login");
   };
 
   return (
@@ -279,7 +289,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <span>Cerrar sesión</span>
           </button>
         </div>
-        <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e0f7ff_0,#f8fafc_34%,#eef8ff_100%)]">{children}</main>
+        <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e0f7ff_0,#f8fafc_34%,#eef8ff_100%)]">{isSessionReady ? children : null}</main>
       </div>
     </div>
   );
