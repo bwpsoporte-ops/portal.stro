@@ -9,6 +9,9 @@ type InvitationPreview = {
   name: string;
   email: string;
   expiresAt: string;
+  invitedById?: string;
+  invitedByName?: string;
+  invitedByEmail?: string;
 };
 
 function ActivateAccountForm() {
@@ -73,9 +76,19 @@ function ActivateAccountForm() {
     const response = await fetch("/api/invitations/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, temporaryPassword }),
+      body: JSON.stringify({ token, temporaryPassword, nextPassword }),
     });
-    const data = (await response.json()) as { ok: boolean; message?: string; invitation?: { name: string; email: string } };
+    const data = (await response.json()) as {
+      ok: boolean;
+      message?: string;
+      invitation?: {
+        name: string;
+        email: string;
+        invitedById?: string;
+        invitedByName?: string;
+        invitedByEmail?: string;
+      };
+    };
 
     if (!response.ok || !data.ok || !data.invitation) {
       setMessage(data.message ?? "No se pudo activar la cuenta.");
@@ -83,7 +96,14 @@ function ActivateAccountForm() {
       return;
     }
 
-    const result = activateInvitedUser(data.invitation.name, data.invitation.email, temporaryPassword, nextPassword);
+    const invitedBy = data.invitation.invitedById
+      ? {
+          id: data.invitation.invitedById,
+          name: data.invitation.invitedByName ?? "",
+          email: data.invitation.invitedByEmail ?? "",
+        }
+      : null;
+    const result = activateInvitedUser(data.invitation.name, data.invitation.email, temporaryPassword, nextPassword, invitedBy);
     setMessage(result.message);
     setIsSubmitting(false);
 
