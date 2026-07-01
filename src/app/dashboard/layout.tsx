@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { LanguageToggle } from "@/components/language-toggle";
 import { getCurrentUser, isRootUser, logout } from "@/lib/auth";
 
 type MenuItem = {
@@ -244,6 +245,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <p className="truncate text-sm font-bold text-white">{currentUser ? `${currentUser.name} | ${currentUser.email}` : "Roatan Self Storage"}</p>
           </div>
           <div className="flex items-center gap-2">
+            <LanguageToggle />
             <ToolbarIcon href="/dashboard/alertas" label="Notificaciones">
               <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
             </ToolbarIcon>
