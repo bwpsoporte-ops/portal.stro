@@ -3,13 +3,17 @@
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { login, logout } from "@/lib/auth";
+import { getUsers, isRootUser, login, logout } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
+  const [showReset, setShowReset] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
+  const [isResetSending, setIsResetSending] = useState(false);
 
   useEffect(() => {
     logout();
@@ -32,6 +36,34 @@ export default function LoginPage() {
     }
 
     router.replace("/dashboard/overview");
+  };
+
+  const handlePasswordResetRequest = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedResetEmail = resetEmail.trim().toLowerCase();
+    const user = getUsers().find((item) => item.email.toLowerCase() === normalizedResetEmail && !isRootUser(item));
+
+    if (!user) {
+      setResetMessage("Ingresa el correo de una cuenta activa. El usuario ROOT.BWP no se restablece por correo.");
+      return;
+    }
+
+    setIsResetSending(true);
+    setResetMessage("Enviando enlace de restablecimiento...");
+
+    const response = await fetch("/api/password-reset/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: user.name, email: user.email }),
+    });
+    const data = (await response.json()) as { ok: boolean; message?: string };
+
+    setResetMessage(data.message ?? (data.ok ? "Revisa tu correo para continuar." : "No se pudo enviar el enlace."));
+    setIsResetSending(false);
+
+    if (response.ok && data.ok) {
+      setResetEmail("");
+    }
   };
 
   
@@ -157,10 +189,38 @@ export default function LoginPage() {
 
           {/* Enlace olvidé contraseña */}
           <div className="mt-4 text-center">
-            <a href="#" className="text-sm text-blue-500 hover:underline">
+            <button type="button" onClick={() => setShowReset((current) => !current)} className="text-sm text-blue-500 hover:underline">
               ¿Ha olvidado su contraseña?
-            </a>
+            </button>
           </div>
+
+          {showReset ? (
+            <form className="mt-4 space-y-3 rounded border border-sky-100 bg-sky-50/60 p-4" onSubmit={handlePasswordResetRequest}>
+              <p className="text-sm font-semibold leading-5 text-slate-700">
+                Ingresa el correo con el que activaste tu cuenta. Te enviaremos un enlace para crear una nueva contraseña.
+              </p>
+              <input
+                type="email"
+                value={resetEmail}
+                onChange={(event) => setResetEmail(event.target.value)}
+                placeholder="correo@empresa.com"
+                className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-400"
+                required
+              />
+              {resetMessage ? (
+                <p className="rounded border border-sky-200 bg-white px-3 py-2 text-xs font-semibold text-sky-700">
+                  {resetMessage}
+                </p>
+              ) : null}
+              <button
+                type="submit"
+                disabled={isResetSending}
+                className="w-full rounded bg-blue-500 py-2.5 text-sm font-semibold text-white transition-colors duration-200 hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isResetSending ? "Enviando..." : "Enviar enlace"}
+              </button>
+            </form>
+          ) : null}
         </div>
       </section>
     </main>
