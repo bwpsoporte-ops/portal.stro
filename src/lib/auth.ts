@@ -7,6 +7,9 @@ export type DashboardUser = {
   status: "ACTIVO";
   createdAt: string;
   lastAccess: string;
+  invitedById?: string;
+  invitedByName?: string;
+  invitedByEmail?: string;
 };
 
 const USERS_KEY = "rss-dashboard-users";
@@ -70,6 +73,19 @@ export function startRootSession(user: Omit<DashboardUser, "password">) {
   return rootUser;
 }
 
+export function startUserSession(user: Omit<DashboardUser, "password">) {
+  const users = getUsers();
+  const sessionUser: DashboardUser = { ...user };
+  const nextUsers = users.some((item) => item.id === sessionUser.id)
+    ? users.map((item) => (item.id === sessionUser.id ? { ...item, ...sessionUser } : item))
+    : [...users, sessionUser];
+
+  saveUsers(nextUsers);
+  window.localStorage.removeItem(ROOT_SESSION_KEY);
+  window.localStorage.setItem(SESSION_KEY, sessionUser.id);
+  return sessionUser;
+}
+
 export function logout() {
   if (!canUseStorage()) return;
   window.localStorage.removeItem(SESSION_KEY);
@@ -107,7 +123,12 @@ export function findPasswordResetUser(email: string) {
   return user;
 }
 
-export function inviteUser(name: string, email: string, password: string) {
+export function inviteUser(
+  name: string,
+  email: string,
+  password: string,
+  invitedBy?: Pick<DashboardUser, "id" | "name" | "email"> | null,
+) {
   const users = getUsers();
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -124,13 +145,22 @@ export function inviteUser(name: string, email: string, password: string) {
     status: "ACTIVO",
     createdAt: new Date().toISOString(),
     lastAccess: "Pendiente de primer acceso",
+    invitedById: invitedBy?.id,
+    invitedByName: invitedBy?.name,
+    invitedByEmail: invitedBy?.email,
   };
 
   saveUsers([...users, user]);
   return { ok: true, message: `Usuario ${normalizedEmail} invitado correctamente.`, user };
 }
 
-export function activateInvitedUser(name: string, email: string, temporaryPassword: string, nextPassword: string) {
+export function activateInvitedUser(
+  name: string,
+  email: string,
+  temporaryPassword: string,
+  nextPassword: string,
+  invitedBy?: Pick<DashboardUser, "id" | "name" | "email"> | null,
+) {
   const users = getUsers();
   const normalizedEmail = email.trim().toLowerCase();
   const user = users.find((item) => item.email.toLowerCase() === normalizedEmail);
@@ -145,6 +175,9 @@ export function activateInvitedUser(name: string, email: string, temporaryPasswo
         name: name.trim(),
         password: nextPassword,
         status: "ACTIVO",
+        invitedById: user.invitedById ?? invitedBy?.id,
+        invitedByName: user.invitedByName ?? invitedBy?.name,
+        invitedByEmail: user.invitedByEmail ?? invitedBy?.email,
       }
     : {
         id: `USR-${String(users.length + 1).padStart(3, "0")}`,
@@ -155,6 +188,9 @@ export function activateInvitedUser(name: string, email: string, temporaryPasswo
         status: "ACTIVO",
         createdAt: new Date().toISOString(),
         lastAccess: "Pendiente de primer acceso",
+        invitedById: invitedBy?.id,
+        invitedByName: invitedBy?.name,
+        invitedByEmail: invitedBy?.email,
       };
 
   saveUsers(user ? users.map((item) => (item.email.toLowerCase() === normalizedEmail ? activatedUser : item)) : [...users, activatedUser]);
