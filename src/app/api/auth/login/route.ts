@@ -21,6 +21,18 @@ type DbUser = {
   invited_by_email: string | null;
 };
 
+function getRootCredentials() {
+  const username = process.env.ROOT_USERNAME ?? process.env.NEXT_PUBLIC_ROOT_USERNAME;
+  const password = process.env.ROOT_PASSWORD ?? process.env.NEXT_PUBLIC_ROOT_PASSWORD;
+  const name = process.env.ROOT_NAME ?? "Root";
+
+  if (!username || !password) {
+    return null;
+  }
+
+  return { username, password, name };
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as LoginRequest;
@@ -29,6 +41,23 @@ export async function POST(request: Request) {
 
     if (!email || !password) {
       return NextResponse.json({ ok: false, message: "Usuario y contraseña son requeridos." }, { status: 400 });
+    }
+
+    const root = getRootCredentials();
+
+    if (root && email === root.username.trim().toLowerCase() && password === root.password) {
+      return NextResponse.json({
+        ok: true,
+        user: {
+          id: "USR-ROOT",
+          name: root.name,
+          email: root.username,
+          role: "Administrador",
+          status: "ACTIVO",
+          createdAt: "2026-05-01T08:00:00-06:00",
+          lastAccess: new Date().toISOString(),
+        },
+      });
     }
 
     const result = await query<DbUser>(
