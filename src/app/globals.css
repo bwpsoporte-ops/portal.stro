@@ -19,28 +19,15 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  margin-top: 0 !important;
+  min-height: 100% !important;
   top: 0 !important;
-  transition: opacity 220ms ease, filter 220ms ease;
+  transition: opacity 260ms ease, filter 260ms ease;
 }
 
 body.language-is-changing {
-  opacity: 0.72;
-  filter: saturate(0.94);
-}
-
-.google-translate-host,
-.goog-te-banner-frame,
-.goog-te-banner-frame.skiptranslate,
-.goog-te-balloon-frame,
-.goog-te-gadget,
-.goog-logo-link,
-.goog-te-gadget-icon,
-iframe.skiptranslate {
-  display: none !important;
-  height: 0 !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
-  visibility: hidden !important;
+  opacity: 0.76;
+  filter: saturate(0.96);
 }
 
 button,
