@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getUsers, isRootUser, login, logout, startRootSession } from "@/lib/auth";
+import { getUsers, isRootUser, login, logout, startRootSession, startUserSession } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -47,7 +47,24 @@ export default function LoginPage() {
     };
 
     if (!response.ok || !data.ok || !data.user) {
-      setMessage(data.message ?? "Usuario o contraseña incorrectos.");
+      const userResponse = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const userData = (await userResponse.json()) as {
+        ok: boolean;
+        message?: string;
+        user?: Parameters<typeof startUserSession>[0];
+      };
+
+      if (!userResponse.ok || !userData.ok || !userData.user) {
+        setMessage(userData.message ?? data.message ?? "Usuario o contraseña incorrectos.");
+        return;
+      }
+
+      startUserSession(userData.user);
+      router.replace("/dashboard/overview");
       return;
     }
 
