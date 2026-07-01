@@ -2,7 +2,7 @@ export type DashboardUser = {
   id: string;
   name: string;
   email: string;
-  password: string;
+  password?: string;
   role: "Administrador" | "Usuario";
   status: "ACTIVO";
   createdAt: string;
@@ -11,45 +11,32 @@ export type DashboardUser = {
 
 const USERS_KEY = "rss-dashboard-users";
 const SESSION_KEY = "rss-dashboard-session";
-
-const rootUsername = process.env.NEXT_PUBLIC_ROOT_USERNAME ?? "ROOT.BWP";
-const rootPassword = process.env.NEXT_PUBLIC_ROOT_PASSWORD ?? "19959501";
-
-const defaultAdmin: DashboardUser = {
-  id: "USR-001",
-  name: "Root BWP",
-  email: rootUsername,
-  password: rootPassword,
-  role: "Administrador",
-  status: "ACTIVO",
-  createdAt: "2026-05-01T08:00:00-06:00",
-  lastAccess: "2026-06-02T08:00:00-06:00",
-};
+const ROOT_SESSION_KEY = "rss-dashboard-root-session";
+const ROOT_USER_ID = "USR-ROOT";
+const LEGACY_ROOT_ID = "USR-001";
 
 function canUseStorage() {
   return typeof window !== "undefined";
 }
 
 export function getUsers(): DashboardUser[] {
-  if (!canUseStorage()) return [defaultAdmin];
+  if (!canUseStorage()) return [];
 
   const savedUsers = window.localStorage.getItem(USERS_KEY);
   if (!savedUsers) {
-    window.localStorage.setItem(USERS_KEY, JSON.stringify([defaultAdmin]));
-    return [defaultAdmin];
+    window.localStorage.setItem(USERS_KEY, JSON.stringify([]));
+    return [];
   }
 
   try {
     const users = JSON.parse(savedUsers) as DashboardUser[];
-    const normalizedRoot = rootUsername.trim().toLowerCase();
-    const nonRootUsers = users.filter((user) => user.email.trim().toLowerCase() !== normalizedRoot && user.id !== defaultAdmin.id);
-    const nextUsers = [defaultAdmin, ...nonRootUsers];
+    const nextUsers = users.filter((user) => user.id !== ROOT_USER_ID && user.id !== LEGACY_ROOT_ID);
 
     window.localStorage.setItem(USERS_KEY, JSON.stringify(nextUsers));
     return nextUsers;
   } catch {
-    window.localStorage.setItem(USERS_KEY, JSON.stringify([defaultAdmin]));
-    return [defaultAdmin];
+    window.localStorage.setItem(USERS_KEY, JSON.stringify([]));
+    return [];
   }
 }
 
@@ -70,27 +57,59 @@ export function login(email: string, password: string) {
   return updatedUser;
 }
 
+export function startRootSession(user: Omit<DashboardUser, "password">) {
+  const rootUser: DashboardUser = {
+    ...user,
+    id: ROOT_USER_ID,
+    role: "Administrador",
+    status: "ACTIVO",
+  };
+
+  window.localStorage.removeItem(SESSION_KEY);
+  window.localStorage.setItem(ROOT_SESSION_KEY, JSON.stringify(rootUser));
+  return rootUser;
+}
+
 export function logout() {
-  if (canUseStorage()) window.localStorage.removeItem(SESSION_KEY);
+  if (!canUseStorage()) return;
+  window.localStorage.removeItem(SESSION_KEY);
+  window.localStorage.removeItem(ROOT_SESSION_KEY);
 }
 
 export function getCurrentUser() {
   if (!canUseStorage()) return null;
+  const rootSession = window.localStorage.getItem(ROOT_SESSION_KEY);
+
+  if (rootSession) {
+    try {
+      return JSON.parse(rootSession) as DashboardUser;
+    } catch {
+      window.localStorage.removeItem(ROOT_SESSION_KEY);
+    }
+  }
+
   const sessionId = window.localStorage.getItem(SESSION_KEY);
   return getUsers().find((user) => user.id === sessionId) ?? null;
 }
 
 export function isRootUser(user: DashboardUser | null | undefined) {
-  return user?.email.trim().toLowerCase() === rootUsername.trim().toLowerCase();
+  return user?.id === ROOT_USER_ID;
+}
+
+export function findPasswordResetUser(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = getUsers().find((item) => item.email.toLowerCase() === normalizedEmail) ?? null;
+
+  if (!user || isRootUser(user)) {
+    return null;
+  }
+
+  return user;
 }
 
 export function inviteUser(name: string, email: string, password: string) {
   const users = getUsers();
   const normalizedEmail = email.trim().toLowerCase();
-
-  if (normalizedEmail === rootUsername.trim().toLowerCase()) {
-    return { ok: false, message: "El usuario root ya existe y no se puede duplicar." };
-  }
 
   if (users.some((user) => user.email.toLowerCase() === normalizedEmail)) {
     return { ok: false, message: "Ya existe un usuario registrado con ese correo." };
@@ -115,10 +134,6 @@ export function activateInvitedUser(name: string, email: string, temporaryPasswo
   const users = getUsers();
   const normalizedEmail = email.trim().toLowerCase();
   const user = users.find((item) => item.email.toLowerCase() === normalizedEmail);
-
-  if (normalizedEmail === rootUsername.trim().toLowerCase()) {
-    return { ok: false, message: "El usuario root se administra desde .env.local." };
-  }
 
   if (user && user.password !== temporaryPassword && user.lastAccess !== "Pendiente de primer acceso") {
     return { ok: false, message: "Esta cuenta ya fue activada. Inicia sesión con tu contraseña actual." };
@@ -160,4 +175,26 @@ export function changePassword(userId: string, currentPassword: string, nextPass
 
   saveUsers(users.map((item) => (item.id === userId ? { ...item, password: nextPassword } : item)));
   return { ok: true, message: "Contraseña actualizada correctamente." };
+}
+
+export function resetPasswordByEmail(email: string, nextPassword: string) {
+  const users = getUsers();
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = users.find((item) => item.email.toLowerCase() === normalizedEmail);
+
+  if (!user) {
+    return { ok: false, message: "No se encontró una cuenta activa con ese correo." };
+  }
+
+  if (isRootUser(user)) {
+    return { ok: false, message: "La contraseña del usuario root se administra desde .env.local." };
+  }
+
+  if (nextPassword.length < 8) {
+    return { ok: false, message: "La nueva contraseña debe tener al menos 8 caracteres." };
+  }
+
+  saveUsers(users.map((item) => (item.id === user.id ? { ...item, password: nextPassword } : item)));
+  logout();
+  return { ok: true, message: "Contraseña actualizada correctamente. Ya puedes iniciar sesión." };
 }
