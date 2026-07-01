@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { query } from "@/lib/server/db";
 
+export const runtime = "nodejs";
+
 type DbUser = {
   id: string;
   username: string;
