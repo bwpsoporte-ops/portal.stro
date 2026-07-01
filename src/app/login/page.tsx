@@ -2,14 +2,25 @@
 
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { login } from "@/lib/auth";
+import { useEffect, useState } from "react";
+import { login, logout } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    logout();
+
+    const handlePageShow = () => {
+      logout();
+    };
+
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, []);
 
   const handleLogin = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -20,7 +31,7 @@ export default function LoginPage() {
       return;
     }
 
-    router.push("/dashboard/overview");
+    router.replace("/dashboard/overview");
   };
 
   
