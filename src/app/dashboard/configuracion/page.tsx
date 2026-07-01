@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionButton, TextInput } from "@/components/ui";
-import { changePassword, DashboardUser, getCurrentUser, getUsers, inviteUser } from "@/lib/auth";
+import { changePassword, DashboardUser, getCurrentUser, getUsers, inviteUser, isRootUser } from "@/lib/auth";
 
 function formatDate(value: string) {
   if (value === "Pendiente de primer acceso") return value;
@@ -26,6 +26,7 @@ export default function ConfiguracionPage() {
   const [inviteMessage, setInviteMessage] = useState("");
   const [passwordMessage, setPasswordMessage] = useState("");
   const [isInviteSending, setIsInviteSending] = useState(false);
+  const visibleUsers = currentUser && !isRootUser(currentUser) ? users.filter((user) => !isRootUser(user)) : users;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -171,7 +172,7 @@ export default function ConfiguracionPage() {
             <table>
               <thead><tr><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th>Último acceso</th></tr></thead>
               <tbody>
-                {users.map((user) => (
+                {visibleUsers.map((user) => (
                   <tr key={user.id}>
                     <td className="font-bold text-slate-900">{user.name}</td>
                     <td>{user.email}</td>
