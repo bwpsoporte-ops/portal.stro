@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 import nodemailer from "nodemailer";
 import { createInvitationToken } from "@/lib/server/invitation-token";
+import { query } from "@/lib/server/db";
 
 type InviteRequest = {
   name?: string;
   email?: string;
   temporaryPassword?: string;
+  invitedById?: string;
+  invitedByName?: string;
+  invitedByEmail?: string;
 };
 
 function requiredEnv(name: string) {
@@ -63,6 +68,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, message: "La contraseña temporal debe tener al menos 8 caracteres." }, { status: 400 });
     }
 
+    const existingUser = await query<{ id: string }>("SELECT id FROM app_users WHERE lower(username) = $1 LIMIT 1", [email]);
+
+    if (existingUser.rows.length > 0) {
+      return NextResponse.json({ ok: false, message: "Ya existe un usuario registrado con ese correo." }, { status: 409 });
+    }
+
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + 1000 * 60 * 60 * 24 * 7);
     const token = createInvitationToken({
@@ -71,6 +82,9 @@ export async function POST(request: Request) {
       temporaryPassword,
       createdAt: createdAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
+      invitedById: body.invitedById,
+      invitedByName: body.invitedByName,
+      invitedByEmail: body.invitedByEmail,
     });
     const origin = new URL(request.url).origin;
     const activationUrl = `${origin}/activar-cuenta?token=${encodeURIComponent(token)}`;
@@ -92,6 +106,39 @@ export async function POST(request: Request) {
       subject: "Activa tu cuenta - Roatan Self Storage",
       html: invitationTemplate({ name, activationUrl, temporaryPassword }),
     });
+
+    await query(
+      `INSERT INTO app_users (
+        id,
+        username,
+        display_name,
+        password_hash,
+        role,
+        status,
+        invited_by_id,
+        invited_by_name,
+        invited_by_email
+      ) VALUES (
+        $1,
+        $2,
+        $3,
+        crypt($4, gen_salt('bf')),
+        'Usuario',
+        'ACTIVO',
+        $5,
+        $6,
+        $7
+      )`,
+      [
+        `USR-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+        email,
+        name,
+        temporaryPassword,
+        body.invitedById ?? null,
+        body.invitedByName ?? null,
+        body.invitedByEmail ?? null,
+      ],
+    );
 
     return NextResponse.json({ ok: true, message: `Invitación enviada a ${email}.`, activationUrl });
   } catch (error) {
