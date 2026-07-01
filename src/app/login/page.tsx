@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getUsers, isRootUser, login, logout } from "@/lib/auth";
+import { getUsers, isRootUser, login, logout, startRootSession } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -26,15 +26,32 @@ export default function LoginPage() {
     return () => window.removeEventListener("pageshow", handlePageShow);
   }, []);
 
-  const handleLogin = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const user = login(email, password);
 
-    if (!user) {
-      setMessage("Usuario o contraseña incorrectos.");
+    if (user) {
+      router.replace("/dashboard/overview");
       return;
     }
 
+    const response = await fetch("/api/auth/root-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = (await response.json()) as {
+      ok: boolean;
+      message?: string;
+      user?: Parameters<typeof startRootSession>[0];
+    };
+
+    if (!response.ok || !data.ok || !data.user) {
+      setMessage(data.message ?? "Usuario o contraseña incorrectos.");
+      return;
+    }
+
+    startRootSession(data.user);
     router.replace("/dashboard/overview");
   };
 
@@ -44,7 +61,7 @@ export default function LoginPage() {
     const user = getUsers().find((item) => item.email.toLowerCase() === normalizedResetEmail && !isRootUser(item));
 
     if (!user) {
-      setResetMessage("Ingresa el correo de una cuenta activa. El usuario ROOT.BWP no se restablece por correo.");
+      setResetMessage("Ingresa el correo de una cuenta activa. .");
       return;
     }
 
