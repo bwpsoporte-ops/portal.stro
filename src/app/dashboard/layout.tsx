@@ -269,6 +269,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </option>
             ))}
           </select>
+          <button
+            aria-label="Cerrar sesión"
+            type="button"
+            onClick={handleLogout}
+            className="mt-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50 focus:outline-none focus:ring-2 focus:ring-sky-200"
+          >
+            <Icon name="logout" />
+            <span>Cerrar sesión</span>
+          </button>
         </div>
         <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e0f7ff_0,#f8fafc_34%,#eef8ff_100%)]">{children}</main>
       </div>
