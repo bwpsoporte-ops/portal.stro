@@ -18,6 +18,9 @@ export async function POST(request: Request) {
         email: invitation.email,
         createdAt: invitation.createdAt,
         expiresAt: invitation.expiresAt,
+        invitedById: invitation.invitedById,
+        invitedByName: invitation.invitedByName,
+        invitedByEmail: invitation.invitedByEmail,
       },
     });
   } catch (error) {
