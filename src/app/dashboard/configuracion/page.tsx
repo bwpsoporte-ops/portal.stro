@@ -26,12 +26,30 @@ export default function ConfiguracionPage() {
   const [inviteMessage, setInviteMessage] = useState("");
   const [passwordMessage, setPasswordMessage] = useState("");
   const [isInviteSending, setIsInviteSending] = useState(false);
-  const visibleUsers = currentUser && !isRootUser(currentUser) ? users.filter((user) => !isRootUser(user)) : users;
+  const visibleUsers = currentUser && !isRootUser(currentUser)
+    ? users.filter((user) => user.invitedById === currentUser.id)
+    : users;
 
   useEffect(() => {
+    async function loadUsers() {
+      try {
+        const response = await fetch("/api/users");
+        const data = (await response.json()) as { ok: boolean; users?: DashboardUser[] };
+
+        if (response.ok && data.ok && data.users) {
+          setUsers(data.users);
+          return;
+        }
+      } catch {
+        // Local fallback keeps the settings screen usable if the database is unavailable.
+      }
+
+      setUsers(getUsers());
+    }
+
     const timeout = window.setTimeout(() => {
       setCurrentUser(getCurrentUser());
-      setUsers(getUsers());
+      loadUsers();
     }, 0);
 
     return () => window.clearTimeout(timeout);
@@ -49,6 +67,11 @@ export default function ConfiguracionPage() {
       return;
     }
 
+    if (!currentUser) {
+      setInviteMessage("No se pudo identificar el usuario autenticado.");
+      return;
+    }
+
     if (getUsers().some((user) => user.email.toLowerCase() === email.trim().toLowerCase())) {
       setInviteMessage("Ya existe un usuario registrado con ese correo.");
       return;
@@ -60,7 +83,14 @@ export default function ConfiguracionPage() {
     const response = await fetch("/api/invitations/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, temporaryPassword: password }),
+      body: JSON.stringify({
+        name,
+        email,
+        temporaryPassword: password,
+        invitedById: currentUser.id,
+        invitedByName: currentUser.name,
+        invitedByEmail: currentUser.email,
+      }),
     });
     const data = (await response.json()) as { ok: boolean; message: string };
 
@@ -70,10 +100,16 @@ export default function ConfiguracionPage() {
       return;
     }
 
-    const result = inviteUser(name, email, password);
+    const result = inviteUser(name, email, password, currentUser);
     setInviteMessage(result.ok ? `${data.message} El acceso quedó creado como pendiente de primer ingreso.` : result.message);
     if (result.ok) {
-      setUsers(getUsers());
+      try {
+        const usersResponse = await fetch("/api/users");
+        const usersData = (await usersResponse.json()) as { ok: boolean; users?: DashboardUser[] };
+        setUsers(usersResponse.ok && usersData.ok && usersData.users ? usersData.users : getUsers());
+      } catch {
+        setUsers(getUsers());
+      }
       event.currentTarget.reset();
     }
     setIsInviteSending(false);
@@ -114,16 +150,20 @@ export default function ConfiguracionPage() {
             </div>
             <div>
               <p className="text-xs font-black uppercase text-sky-600">Usuario autenticado</p>
-              <h2 className="mt-1 text-xl font-black text-slate-950">{currentUser?.name ?? "Administrador RSS"}</h2>
-              <p className="mt-1 text-sm text-slate-500">{currentUser?.email ?? "admin@roatanselfstorage.com"}</p>
+              <h2 className="mt-1 text-xl font-black text-slate-950">{currentUser?.name ?? "Cargando usuario..."}</h2>
+              <p className="mt-1 text-sm text-slate-500">{currentUser?.email ?? "Validando sesión..."}</p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <StatusBadge tone="green">{currentUser?.status ?? "ACTIVO"}</StatusBadge>
-                <StatusBadge tone="blue">{currentUser?.role ?? "Administrador"}</StatusBadge>
+                {currentUser ? (
+                  <>
+                    <StatusBadge tone="green">{currentUser.status}</StatusBadge>
+                    <StatusBadge tone="blue">{currentUser.role}</StatusBadge>
+                  </>
+                ) : null}
               </div>
             </div>
           </div>
           <div className="mt-5 grid gap-3 border-t border-sky-100 pt-4 text-sm sm:grid-cols-3">
-            <div><p className="text-xs font-black uppercase text-slate-400">ID de usuario</p><p className="mt-1 font-bold text-slate-700">{currentUser?.id ?? "USR-001"}</p></div>
+            <div><p className="text-xs font-black uppercase text-slate-400">ID de usuario</p><p className="mt-1 font-bold text-slate-700">{currentUser?.id ?? "-"}</p></div>
             <div><p className="text-xs font-black uppercase text-slate-400">Último acceso</p><p className="mt-1 font-bold text-slate-700">{currentUser ? formatDate(currentUser.lastAccess) : "-"}</p></div>
             <div><p className="text-xs font-black uppercase text-slate-400">Permisos</p><p className="mt-1 font-bold text-slate-700">Acceso completo al dashboard</p></div>
           </div>
@@ -165,22 +205,34 @@ export default function ConfiguracionPage() {
 
         <section className="rounded-lg border border-slate-200 bg-white">
           <div className="border-b border-slate-200 p-4">
-            <h2 className="font-black text-slate-950">Usuarios con acceso</h2>
-            <p className="mt-1 text-sm text-slate-500">Cuentas habilitadas para ingresar a la plataforma.</p>
+            <h2 className="font-black text-slate-950">{currentUser && !isRootUser(currentUser) ? "Usuarios invitados por ti" : "Usuarios con acceso"}</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              {currentUser && !isRootUser(currentUser)
+                ? "Cuentas que invitaste desde tu usuario."
+                : "Cuentas habilitadas para ingresar a la plataforma."}
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table>
-              <thead><tr><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th>Último acceso</th></tr></thead>
+              <thead><tr><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th>Último acceso</th><th>Invitado por</th></tr></thead>
               <tbody>
-                {visibleUsers.map((user) => (
+                {visibleUsers.length ? visibleUsers.map((user) => (
                   <tr key={user.id}>
-                    <td className="font-bold text-slate-900">{user.name}</td>
+                    <td>
+                      <p className="font-bold text-slate-900">{user.name}</p>
+                      <p className="mt-1 font-mono text-xs text-slate-500">{user.id}</p>
+                    </td>
                     <td>{user.email}</td>
                     <td>{user.role}</td>
                     <td><StatusBadge tone="green">{user.status}</StatusBadge></td>
                     <td>{formatDate(user.lastAccess)}</td>
+                    <td>{user.invitedByName ? `${user.invitedByName} | ${user.invitedByEmail}` : "Sin registro"}</td>
                   </tr>
-                ))}
+                )) : (
+                  <tr>
+                    <td colSpan={6} className="text-center font-bold text-slate-500">No hay usuarios invitados todavía.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
