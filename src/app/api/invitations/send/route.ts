@@ -4,6 +4,8 @@ import nodemailer from "nodemailer";
 import { createInvitationToken } from "@/lib/server/invitation-token";
 import { query } from "@/lib/server/db";
 
+export const runtime = "nodejs";
+
 type InviteRequest = {
   name?: string;
   email?: string;
