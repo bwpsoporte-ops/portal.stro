@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 import { readInvitationToken } from "@/lib/server/invitation-token";
 import { query } from "@/lib/server/db";
+
+export const runtime = "nodejs";
 
 type ActivateRequest = {
   token?: string;
@@ -28,22 +31,44 @@ export async function POST(request: Request) {
 
     if (body.nextPassword) {
       await query(
-        `UPDATE app_users
-         SET display_name = $1,
-             password_hash = crypt($2, gen_salt('bf')),
-             invited_by_id = COALESCE(invited_by_id, $3),
-             invited_by_name = COALESCE(invited_by_name, $4),
-             invited_by_email = COALESCE(invited_by_email, $5),
-             updated_at = now()
-         WHERE lower(username) = $6
-           AND role = 'Usuario'`,
+        `INSERT INTO app_users (
+           id,
+           username,
+           display_name,
+           password_hash,
+           role,
+           status,
+           invited_by_id,
+           invited_by_name,
+           invited_by_email
+         ) VALUES (
+           $1,
+           $2,
+           $3,
+           crypt($4, gen_salt('bf')),
+           'Usuario',
+           'ACTIVO',
+           $5,
+           $6,
+           $7
+         )
+         ON CONFLICT (username) DO UPDATE SET
+           display_name = EXCLUDED.display_name,
+           password_hash = EXCLUDED.password_hash,
+           role = 'Usuario',
+           status = 'ACTIVO',
+           invited_by_id = COALESCE(app_users.invited_by_id, EXCLUDED.invited_by_id),
+           invited_by_name = COALESCE(app_users.invited_by_name, EXCLUDED.invited_by_name),
+           invited_by_email = COALESCE(app_users.invited_by_email, EXCLUDED.invited_by_email),
+           updated_at = now()`,
         [
+          `USR-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+          invitation.email.toLowerCase(),
           invitation.name,
           body.nextPassword,
           invitation.invitedById ?? null,
           invitation.invitedByName ?? null,
           invitation.invitedByEmail ?? null,
-          invitation.email.toLowerCase(),
         ],
       );
     }
