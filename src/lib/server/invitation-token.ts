@@ -6,6 +6,9 @@ export type InvitationPayload = {
   temporaryPassword: string;
   createdAt: string;
   expiresAt: string;
+  invitedById?: string;
+  invitedByName?: string;
+  invitedByEmail?: string;
 };
 
 function getKey() {
