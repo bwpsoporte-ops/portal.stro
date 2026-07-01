@@ -47,29 +47,15 @@ export default function LoginPage() {
     };
 
     if (userResponse.ok && userData.ok && userData.user) {
-      startUserSession(userData.user);
+      if (userData.user.id === "USR-ROOT") {
+        startRootSession(userData.user);
+      } else {
+        startUserSession(userData.user);
+      }
       router.replace("/dashboard/overview");
       return;
     }
-
-    const response = await fetch("/api/auth/root-login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = (await response.json()) as {
-      ok: boolean;
-      message?: string;
-      user?: Parameters<typeof startRootSession>[0];
-    };
-
-    if (!response.ok || !data.ok || !data.user) {
-      setMessage(userData.message ?? data.message ?? "Usuario o contraseña incorrectos.");
-      return;
-    }
-
-    startRootSession(data.user);
-    router.replace("/dashboard/overview");
+    setMessage(userData.message ?? "Usuario o contraseña incorrectos.");
   };
 
   const handlePasswordResetRequest = async (event: React.FormEvent<HTMLFormElement>) => {
