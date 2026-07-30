@@ -38,6 +38,9 @@ const icons: Record<string, React.ReactNode> = {
   card: (
     <path d="M4 7h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7Zm0 4h16M7 15h4" />
   ),
+  services: (
+    <path d="M12 2v20M17 5.5A4.5 4.5 0 0 0 12 3c-2.8 0-5 1.6-5 4s2 3.5 5 4 5 1.6 5 4-2.2 4-5 4a5.5 5.5 0 0 1-5-2.5M3 12h18" />
+  ),
   shield: (
     <path d="M12 3 20 6v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6l8-3Zm-3 9 2 2 4-5" />
   ),
@@ -99,7 +102,7 @@ function ToolbarIcon({ label, children, href }: { label: string; children: React
 
   if (href) {
     return (
-      <Link aria-label={label} title={label} href={href} className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-sky-300/70 bg-white/15 text-white transition hover:bg-white/25">
+      <Link aria-label={label} title={label} href={href} className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-sky-300/70 bg-white/15 text-white transition hover:bg-white/25">
         {content}
       </Link>
     );
@@ -110,7 +113,7 @@ function ToolbarIcon({ label, children, href }: { label: string; children: React
       aria-label={label}
       title={label}
       type="button"
-      className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-sky-300/70 bg-white/15 text-white transition hover:bg-white/25"
+      className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-sky-300/70 bg-white/15 text-white transition hover:bg-white/25"
     >
       {content}
     </button>
@@ -120,7 +123,6 @@ function ToolbarIcon({ label, children, href }: { label: string; children: React
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [collapsed, setCollapsed] = useState(false);
   const [currentUser, setCurrentUser] = useState<ReturnType<typeof getCurrentUser>>(null);
   const [isSessionReady, setIsSessionReady] = useState(false);
   const visibleMenu = menu.filter((item) => !item.rootOnly || isRootUser(currentUser));
@@ -160,101 +162,50 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
-      <aside
-        className={`no-print relative hidden shrink-0 bg-[#4188ef] text-white shadow-2xl shadow-sky-900/25 transition-[width] duration-200 md:flex md:flex-col ${
-          collapsed ? "w-20" : "w-62"
-        }`}
-      >
-        <button
-          aria-label={collapsed ? "Expandir menú" : "Contraer menú"}
-          title={collapsed ? "Expandir menú" : "Contraer menú"}
-          type="button"
-          onClick={() => setCollapsed((current) => !current)}
-          className="absolute -right-3 top-6 z-10 inline-flex h-7 w-7 items-center justify-center rounded-full border border-sky-200 bg-white text-sky-700 shadow-lg shadow-sky-900/20 transition hover:bg-sky-50"
-        >
-          <svg
-            aria-hidden="true"
-            className={`h-4 w-4 transition-transform ${collapsed ? "rotate-180" : ""}`}
-            fill="none"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="2.5"
-            viewBox="0 0 24 24"
-          >
-            <path d="m15 18-6-6 6-6" />
-          </svg>
-        </button>
-
-        <div className={`border-b border-white/12 px-2 py-6 ${collapsed ? "px-3" : ""}`}>
-          <div className={`flex items-center justify-center   ${collapsed ? "h-15 w-15 p-3" : "w-full p-3"}`}>
-            <Image
-              alt="Roatan Self Storage"
-              className={`h-auto ${collapsed ? "w-10" : "w-30"}`}
-              height={206}
-              priority
-              src="/logologin.png"
-              width={263}
-            />
-          </div>
-          {!collapsed ? (
-            <>
-              <p className="mt-4 text-xs font-black uppercase text-sky-100">Roatan Self Storage</p>
-              <h2 className="mt-1 text-xl font-black tracking-tight text-white">Facturación Fiscal</h2>
-              <p className="mt-2 text-xs font-semibold leading-5 text-sky-50/90">Control BAC, CAI, facturas y Storeganise.</p>
-            </>
-          ) : null}
-        </div>
-        <nav className="flex-1 space-y-1.5 p-3">
-          {visibleMenu.filter((item) => !item.mobileOnly).map((item) => {
-            const active = pathname === item.href;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                title={collapsed ? item.label : undefined}
-                className={`flex min-h-11 items-center gap-3 rounded-md px-3 py-2 text-sm font-extrabold transition ${
-                  active
-                    ? "bg-white text-sky-800 shadow-lg shadow-sky-900/15"
-                    : "text-sky-50 hover:bg-white/14 hover:text-white"
-                } ${collapsed ? "justify-center px-2" : ""}`}
-              >
-                <span
-                  className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
-                    active ? "bg-sky-50 text-sky-700" : "bg-white/12 text-white"
-                  }`}
-                >
-                  <Icon name={item.icon} />
-                </span>
-                {!collapsed ? <span className="truncate">{item.label}</span> : null}
-              </Link>
-            );
-          })}
-        </nav>
-        <div className="border-t border-white/15 p-3">
-          <button
-            aria-label="Cerrar sesión"
-            title={collapsed ? "Cerrar sesión" : undefined}
-            type="button"
-            onClick={handleLogout}
-            className={`flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-extrabold text-sky-50 transition hover:bg-white/14 hover:text-white ${collapsed ? "justify-center px-2" : ""}`}
-          >
-            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/12 text-white">
-              <Icon name="logout" />
+    <div className="flex min-h-screen flex-col bg-slate-50">
+      <header className="no-print sticky top-0 z-40 border-b border-[#2f70d6] bg-[#4188ef] text-white shadow-lg shadow-sky-900/20">
+        <div className="flex min-h-16 items-center gap-3 px-3 md:px-4">
+          <Link href="/dashboard/overview" className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-12 shrink-0 items-center justify-center rounded-lg border border-white/20 bg-white/12 p-2 shadow-md shadow-blue-900/20">
+              <Image alt="Roatan Self Storage" className="h-auto w-9" height={206} priority src="/logologin.png" width={263} />
             </span>
-            {!collapsed ? <span>Cerrar sesión</span> : null}
-          </button>
-        </div>
-      </aside>
+            <span className="hidden min-w-0 2xl:block">
+              <span className="block truncate text-sm font-black tracking-tight text-white md:text-base">Roatan Self Storage</span>
+              <span className="block truncate text-[10px] font-bold uppercase tracking-[0.16em] text-sky-100">Portal administrativo</span>
+            </span>
+          </Link>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="no-print flex min-h-16 items-center justify-between gap-3 border-b border-[#2f70d6] bg-[#4188ef] px-4 text-white shadow-lg shadow-sky-900/15 md:px-6">
-          <div className="min-w-0">
-            <p className="text-xs font-black uppercase text-sky-100">Panel Administrativo</p>
-            <p className="truncate text-sm font-bold text-white">{currentUser ? `${currentUser.name} | ${currentUser.email}` : "Roatan Self Storage"}</p>
-          </div>
-          <div className="flex items-center gap-2">
+          <nav className="hidden min-w-0 flex-1 self-stretch overflow-x-auto md:block">
+            <div className="flex h-full w-max min-w-full items-stretch justify-center gap-0.5">
+              {visibleMenu.filter((item) => !item.mobileOnly).map((item) => {
+                const active = pathname === item.href;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    title={item.label}
+                    className={`group relative flex min-h-16 items-center gap-2 px-2.5 text-xs font-extrabold transition ${
+                      active ? "bg-white text-sky-800" : "text-sky-50 hover:bg-white/12 hover:text-white"
+                    }`}
+                  >
+                    <span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition ${
+                      active ? "bg-sky-50 text-sky-700" : "bg-white/12 text-white group-hover:bg-white/20"
+                    }`}>
+                      <Icon name={item.icon} />
+                    </span>
+                    <span className="hidden whitespace-nowrap xl:inline">{item.label}</span>
+                    {active ? <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-sky-600" /> : null}
+                  </Link>
+                );
+              })}
+            </div>
+          </nav>
+
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <div className="mr-2 hidden text-right lg:block">
+              <p className="text-xs font-black text-white">{currentUser?.name ?? "Administrador"}</p>
+              <p className="max-w-52 truncate text-[11px] font-semibold text-sky-100">{currentUser?.email ?? ""}</p>
+            </div>
             <LanguageToggle />
             <ToolbarIcon href="/dashboard/alertas" label="Notificaciones">
               <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
@@ -262,16 +213,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <ToolbarIcon href="/dashboard/configuracion" label="Configuración">
               <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Zm7.4-2.3a8 8 0 0 0 0-2.4l2-1.5-2-3.5-2.4 1a8 8 0 0 0-2-1.2L14.7 3h-5.4L9 5.6a8 8 0 0 0-2 1.2l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 0 2.4l-2 1.5 2 3.5 2.4-1a8 8 0 0 0 2 1.2l.3 2.6h5.4l.3-2.6a8 8 0 0 0 2-1.2l2.4 1 2-3.5-2-1.5Z" />
             </ToolbarIcon>
+            <button
+              aria-label="Cerrar sesión"
+              title="Cerrar sesión"
+              type="button"
+              onClick={handleLogout}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-sky-300/70 bg-white/15 px-3 text-white transition hover:bg-white/25"
+            >
+              <Icon name="logout" />
+              <span className="hidden text-xs font-black xl:inline">Salir</span>
+            </button>
           </div>
-        </header>
+        </div>
 
-        <div className="no-print border-b border-sky-100 bg-white p-3 md:hidden">
+        <div className="border-t border-white/15 bg-[#397fe5] p-3 md:hidden">
           <select
             value={visibleMenu.find((item) => item.href === pathname)?.href ?? "/dashboard/overview"}
             onChange={(event) => {
               window.location.href = event.target.value;
             }}
-            className="w-full rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-bold text-slate-800 outline-none focus:border-sky-400"
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-slate-800 shadow-sm outline-none focus:border-sky-400"
           >
             {visibleMenu.map((item) => (
               <option key={item.href} value={item.href}>
@@ -279,18 +240,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </option>
             ))}
           </select>
-          <button
-            aria-label="Cerrar sesión"
-            type="button"
-            onClick={handleLogout}
-            className="mt-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50 focus:outline-none focus:ring-2 focus:ring-sky-200"
-          >
-            <Icon name="logout" />
-            <span>Cerrar sesión</span>
-          </button>
         </div>
-        <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e0f7ff_0,#f8fafc_34%,#eef8ff_100%)]">{isSessionReady ? children : null}</main>
-      </div>
+      </header>
+
+      <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e0f7ff_0,#f8fafc_34%,#eef8ff_100%)]">{isSessionReady ? children : null}</main>
+      <footer className="no-print border-t border-sky-100 bg-white/90 px-5 py-3 text-center text-[11px] font-semibold text-slate-400">
+        Created by BWP
+      </footer>
     </div>
   );
 }
