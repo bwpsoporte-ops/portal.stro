@@ -18,6 +18,10 @@ type MenuItem = {
 const menu: MenuItem[] = [
   { href: "/dashboard/overview", label: "Overview", icon: "grid" },
   { href: "/dashboard/facturas", label: "Facturas", icon: "invoice" },
+  { href: "/dashboard/proformas", label: "Proformas", icon: "template" },
+  { href: "/dashboard/caja", label: "Caja", icon: "cash" },
+  { href: "/dashboard/pagos-servicios", label: "Pagos de servicios", icon: "services" },
+  { href: "/dashboard/facturas-servicios", label: "emitidos de servicios", icon: "invoice" },
   { href: "/dashboard/pagos-bac", label: "Pagos BAC", icon: "card" },
   { href: "/dashboard/cai-correlativos", label: "CAI / Correlativos", icon: "shield" },
   { href: "/dashboard/plantilla-factura", label: "Plantilla de Factura", icon: "template" },
@@ -40,6 +44,9 @@ const icons: Record<string, React.ReactNode> = {
   ),
   services: (
     <path d="M12 2v20M17 5.5A4.5 4.5 0 0 0 12 3c-2.8 0-5 1.6-5 4s2 3.5 5 4 5 1.6 5 4-2.2 4-5 4a5.5 5.5 0 0 1-5-2.5M3 12h18" />
+  ),
+  cash: (
+    <path d="M3 6h18v12H3V6Zm4 3a3 3 0 0 1-3 3m13-3a3 3 0 0 0 3 3M7 15a3 3 0 0 0-3-3m13 3a3 3 0 0 1 3-3m-8 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
   ),
   shield: (
     <path d="M12 3 20 6v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6l8-3Zm-3 9 2 2 4-5" />
@@ -166,7 +173,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <header className="no-print sticky top-0 z-40 border-b border-[#2f70d6] bg-[#4188ef] text-white shadow-lg shadow-sky-900/20">
         <div className="flex min-h-16 items-center gap-3 px-3 md:px-4">
           <Link href="/dashboard/overview" className="flex min-w-0 items-center gap-3">
-            <span className="flex h-10 w-12 shrink-0 items-center justify-center rounded-lg border border-white/20 bg-white/12 p-2 shadow-md shadow-blue-900/20">
+            <span className="flex h-10 w-12 shrink-0 items-center justify-center rounded-lg border border-white bg-white p-2 shadow-md shadow-black/20">
               <Image alt="Roatan Self Storage" className="h-auto w-9" height={206} priority src="/logologin.png" width={263} />
             </span>
             <span className="hidden min-w-0 2xl:block">
@@ -218,7 +225,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               title="Cerrar sesión"
               type="button"
               onClick={handleLogout}
-              className="inline-flex h-10 items-center gap-2 rounded-lg border border-sky-300/70 bg-white/15 px-3 text-white transition hover:bg-white/25"
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-red-300 bg-red-500 px-3 text-white shadow-sm transition hover:bg-red-600"
             >
               <Icon name="logout" />
               <span className="hidden text-xs font-black xl:inline">Salir</span>
@@ -243,7 +250,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
       </header>
 
-      <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e0f7ff_0,#f8fafc_34%,#eef8ff_100%)]">{isSessionReady ? children : null}</main>
+      <main className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_right,#e8f5eb_0,#f8fafc_34%,#f1f8f3_100%)]">{isSessionReady ? children : null}</main>
       <footer className="no-print border-t border-sky-100 bg-white/90 px-5 py-3 text-center text-[11px] font-semibold text-slate-400">
         Created by BWP
       </footer>
