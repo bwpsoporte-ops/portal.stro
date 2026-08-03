@@ -5,7 +5,7 @@ type QueryValue = string | number | boolean | null | Date;
 let pool: Pool | null = null;
 let schemaReady = false;
 
-function getPool() {
+export function getPool() {
   const connectionString = process.env.DATABASE_URL;
 
   if (!connectionString) {
