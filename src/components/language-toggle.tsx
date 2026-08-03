@@ -326,9 +326,136 @@ const textTranslations: Record<string, string> = {
   Completar: "Complete",
   "Ver origen": "View Source",
   "No hay procesos pendientes.": "There are no pending processes.",
+  Salir: "Sign Out",
+  Caja: "Cashier",
+  Proformas: "Proformas",
+  "Pagos de servicios": "Service Payments",
+  "Facturas de servicios": "Service Invoices",
+  "Caja (Cash Payment)": "Cashier (Cash Payment)",
+  "Crea facturas manuales, selecciona la bodega y registra pagos en caja.": "Create manual invoices, select the storage unit, and record cash payments.",
+  "Crea cotizaciones profesionales, envíalas y conviértelas en factura.": "Create professional quotes, send them, and convert them into invoices.",
+  "Nueva factura manual": "New Manual Invoice",
+  "Nueva proforma": "New Proforma",
+  "Facturación manual digital con moneda seleccionable.": "Digital manual billing with selectable currency.",
+  "Precio en USD ($)": "Price in USD ($)",
+  "Precio en Lempiras (L)": "Price in Lempiras (L)",
+  "Cliente y bodega": "Customer and Storage Unit",
+  "Usar cliente del Portal": "Use Portal Customer",
+  "Ingresar manual": "Enter Manually",
+  "Nombre o empresa": "Name or Company",
+  "RTN / Tax ID": "RTN / Tax ID",
+  Teléfono: "Phone",
+  "Dirección fiscal": "Billing Address",
+  "Buscar cliente de las facturas...": "Search invoice customers...",
+  "Bodegas del cliente": "Customer Storage Units",
+  "Mapa principal": "Main Map",
+  "Detalle manual de la factura": "Manual Invoice Details",
+  "Escribe libremente lo que deseas cobrar.": "Enter the item or service you want to charge.",
+  "+ Agregar concepto": "+ Add Item",
+  "Descripción del producto, servicio o cargo": "Product, service, or charge description",
+  Eliminar: "Delete",
+  "Descuento %": "Discount %",
+  "Impuesto %": "Tax %",
+  Impuestos: "Taxes",
+  "Notas y condiciones": "Notes and Terms",
+  "Crear factura": "Create Invoice",
+  "Guardar borrador": "Save Draft",
+  "Guardar como enviada": "Save as Sent",
+  "Historial de facturas de caja": "Cash Invoice History",
+  "Historial de proformas": "Proforma History",
+  "Cliente o número": "Customer or Number",
+  "Todo el historial": "All History",
+  Hoy: "Today",
+  "Esta semana": "This Week",
+  "Este mes": "This Month",
+  Todos: "All",
+  Borrador: "Draft",
+  Aceptada: "Accepted",
+  Rechazada: "Rejected",
+  Convertida: "Converted",
+  Abonada: "Partially Paid",
+  Pagada: "Paid",
+  Pagado: "Paid",
+  "Registrar pago": "Record Payment",
+  "Enviar correo": "Send Email",
+  "Convertir en factura": "Convert to Invoice",
+  "Selecciona clientes y bodegas desde el mapa, y asigna cargos diferentes a cada unidad.": "Select customers and storage units from the map and assign different charges to each unit.",
+  "Cliente para el cargo": "Customer for the Charge",
+  "Modo manual": "Manual Mode",
+  "Buscar cliente": "Search Customer",
+  "Mapa de bodegas": "Storage Unit Map",
+  "Selecciona cualquier código para consultar y configurar la bodega.": "Select any code to view and configure the storage unit.",
+  Disponible: "Available",
+  "Referencia gris": "Gray Reference",
+  Seleccionada: "Selected",
+  "Bodega libre": "Available Storage Unit",
+  "Bodega ocupada": "Assigned Storage Unit",
+  "Sin cliente asignado": "No Customer Assigned",
+  "Total configurado": "Configured Total",
+  "Servicios disponibles": "Available Services",
+  "Factura eléctrica": "Electric Bill",
+  "Luz individual": "Individual Light",
+  Internet: "Internet",
+  Parqueo: "Parking",
+  "Otros servicios": "Other Services",
+  "Otros cargos": "Other Charges",
+  "Configuración actual": "Current Configuration",
+  "Todavía no seleccionaste servicios para esta bodega.": "No services have been selected for this storage unit yet.",
+  "Facturas y cargos históricos": "Invoice and Charge History",
+  "Cargos anteriores": "Previous Charges",
+  "No existen cargos anteriores.": "There are no previous charges.",
+  Cerrar: "Close",
+  "Seleccionar y configurar": "Select and Configure",
+  "Abrir configuración": "Open Configuration",
+  "Configuración visible": "Visible Configuration",
+  "Cargos por bodega": "Charges by Storage Unit",
+  "Total global": "Global Total",
+  "Quitar bodega ×": "Remove Storage Unit ×",
+  "Cargos para bodega": "Charges for Storage Unit",
+  "Total bodega en vivo": "Live Storage Unit Total",
+  "Consumo estimado": "Estimated Consumption",
+  "kWh estimados": "Estimated kWh",
+  Costo: "Cost",
+  "Total recibo": "Bill Total",
+  "Margen %": "Margin %",
+  "Precio automático": "Automatic Price",
+  "Conversión USD/HNL:": "USD/HNL Conversion:",
+  "Estado final": "Final Status",
+  "Pendiente de pago": "Pending Payment",
+  "Confirmar pagado": "Confirm Paid",
+  Método: "Method",
+  Efectivo: "Cash",
+  Transferencia: "Bank Transfer",
+  Tarjeta: "Card",
+  "Generar factura global": "Generate Global Invoice",
+  "Facturas globales de servicios": "Global Service Invoices",
+  Conceptos: "Items",
+  "Imprimir / PDF": "Print / PDF",
+  "Facturas globales USD y HNL, detalladas por bodega y cargo.": "Global USD and HNL invoices detailed by storage unit and charge.",
+  Todas: "All",
+  "Buscar cliente, número, bodega o servicio": "Search customer, number, storage unit, or service",
+  Pendientes: "Pending",
+  Abonadas: "Partially Paid",
+  Pagadas: "Paid",
+  "Facturas globales emitidas": "Issued Global Invoices",
+  "Bodegas y cargos": "Storage Units and Charges",
+  Moneda: "Currency",
+  Equivalente: "Equivalent",
+  "PDF detallado": "Detailed PDF",
+  "No hay facturas globales con estos filtros.": "There are no global invoices matching these filters.",
 };
 
 const regexTranslations: Array<[RegExp, string]> = [
+  [/^Bodega (.+)$/, "Storage Unit $1"],
+  [/^Cargos para bodega (.+)$/, "Charges for Storage Unit $1"],
+  [/^Total global · (USD|HNL)$/, "Global Total · $1"],
+  [/^Total bodega en vivo · (USD|HNL)$/, "Live Storage Unit Total · $1"],
+  [/^Precio automático · (USD|HNL)$/, "Automatic Price · $1"],
+  [/^(\d+) servicio\(s\)$/, "$1 service(s)"],
+  [/^(\d+) documento\(s\)$/, "$1 document(s)"],
+  [/^Cantidad (.+)$/, "Quantity $1"],
+  [/^Costo (.+)$/, "Cost $1"],
+  [/^Margen (.+)%$/, "Margin $1%"],
   [/^PDF de factura (.+) preparado para descarga\.$/, "Invoice $1 PDF prepared for download."],
   [/^Factura (.+) reenviada a (.+)\.$/, "Invoice $1 resent to $2."],
   [/^Alerta (.+) marcada como (.+)\.$/, "Alert $1 marked as $2."],
@@ -379,7 +506,15 @@ function shouldSkipNode(node: Node) {
     return true;
   }
 
-  return Boolean(parent.closest("script, style, svg, code, pre"));
+  if (parent.closest("script, style, svg, code, pre")) {
+    return true;
+  }
+
+  // Los importes son contenido dinámico controlado por React. El traductor no
+  // debe guardar ni restaurar sus textos porque podría devolver un total nuevo
+  // al valor inicial ($0.00 / L 0.00) después de cada renderizado.
+  const value = node.nodeValue ?? "";
+  return /(?:\$|USD\s|HNL\s|L\s*)[\d.,]+/i.test(value);
 }
 
 function applyDomLanguage(language: LanguageCode) {
@@ -394,12 +529,27 @@ function applyDomLanguage(language: LanguageCode) {
     const textNode = node as Text;
 
     if (!shouldSkipNode(textNode)) {
-      if (!textNodeOriginals.has(textNode)) {
-        textNodeOriginals.set(textNode, textNode.nodeValue ?? "");
+      const current = textNode.nodeValue ?? "";
+      let original = textNodeOriginals.get(textNode);
+
+      if (original === undefined) {
+        original = current;
+        const translated = translateText(original);
+        if (translated !== original) {
+          textNodeOriginals.set(textNode, original);
+        }
+      } else {
+        const previousTranslation = translateText(original);
+        if (current !== original && current !== previousTranslation) {
+          original = current;
+          textNodeOriginals.set(textNode, original);
+        }
       }
 
-      const original = textNodeOriginals.get(textNode) ?? "";
-      textNode.nodeValue = language === "en" ? translateText(original) : original;
+      const nextValue = language === "en" ? translateText(original) : original;
+      if (textNode.nodeValue !== nextValue) {
+        textNode.nodeValue = nextValue;
+      }
     }
 
     node = walker.nextNode();
@@ -472,7 +622,9 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
       }, 0);
     });
 
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label"] });
+    // Se observan elementos nuevos y atributos traducibles, pero no cambios de
+    // texto realizados por React (totales, estados, contadores y conversiones).
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label"] });
 
     return () => observer.disconnect();
   }, [language]);
