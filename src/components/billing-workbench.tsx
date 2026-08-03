@@ -15,6 +15,10 @@ type FiscalConfig = { cai: string; range_start: number; range_end: number; curre
 type Occupancy = { unit_code: string; unit_id: string | null; customer_id: string | null; customer_key: string; customer_name: string; customer_email: string | null; next_due_date: string };
 
 const money = (value: number, currency: "USD" | "HNL") => new Intl.NumberFormat(currency === "HNL" ? "es-HN" : "en-US", { style: "currency", currency }).format(value || 0);
+const inputNumber = (value: string) => {
+  const parsed = Number(value.trim().replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : 0;
+};
 const blankItem = (): Item => ({ catalogCode: "", description: "", quantity: 1, unitPrice: 0, discountPercent: 0, taxRate: 15 });
 const matchesPeriod = (dateValue: string, period: PeriodFilter) => {
   if (period === "ALL") return true;
@@ -84,7 +88,10 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   }, [load]);
 
   const selected = customers.find((entry) => entry.id === customerId);
-  const customerUnits = selected ? units.filter((unit) => unit.storeganise_user_id === selected.storeganise_user_id) : [];
+  const customerUnits = useMemo(
+    () => selected ? units.filter((unit) => unit.storeganise_user_id === selected.storeganise_user_id) : [],
+    [selected, units],
+  );
   const ownedUnitIds = useMemo(() => new Set(customerUnits.map((unit) => unit.id)), [customerUnits]);
   const mapUnits = useMemo<StorageMapUnit[]>(() => {
     const byNumber = new Map(units.map((unit) => [String(unit.unit_number), unit]));
@@ -275,11 +282,11 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
               {items.map((item, index) => (
                 <div key={index} className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-6">
                   <TextInput required className="md:col-span-3" placeholder="Descripción del producto, servicio o cargo" value={item.description} onChange={(e) => updateItem(index, { description: e.target.value })} />
-                  <TextInput required min="0.001" step="0.001" type="number" placeholder="Cantidad" value={item.quantity || ""} onChange={(e) => updateItem(index, { quantity: e.target.valueAsNumber || 0 })} />
-                  <TextInput required min="0" step="0.01" type="number" placeholder="Precio" value={item.unitPrice || ""} onChange={(e) => updateItem(index, { unitPrice: e.target.valueAsNumber || 0 })} />
+                  <TextInput required inputMode="decimal" placeholder="Cantidad" value={item.quantity || ""} onChange={(event) => updateItem(index, { quantity: inputNumber(event.currentTarget.value) })} />
+                  <TextInput required inputMode="decimal" placeholder="Precio" value={item.unitPrice || ""} onChange={(event) => updateItem(index, { unitPrice: inputNumber(event.currentTarget.value) })} />
                   <button type="button" disabled={items.length === 1} onClick={() => setItems(items.filter((_, i) => i !== index))} className="rounded-md text-xs font-black text-rose-600 disabled:opacity-30">Eliminar</button>
-                  <label className="text-xs font-bold text-slate-500">Descuento %<TextInput min="0" max="100" step="0.01" type="number" value={item.discountPercent || ""} onChange={(e) => updateItem(index, { discountPercent: e.target.valueAsNumber || 0 })} /></label>
-                  <label className="text-xs font-bold text-slate-500">Impuesto %<TextInput min="0" step="0.01" type="number" value={item.taxRate || ""} onChange={(e) => updateItem(index, { taxRate: e.target.valueAsNumber || 0 })} /></label>
+                  <label className="text-xs font-bold text-slate-500">Descuento %<TextInput inputMode="decimal" value={item.discountPercent || ""} onChange={(event) => updateItem(index, { discountPercent: inputNumber(event.currentTarget.value) })} /></label>
+                  <label className="text-xs font-bold text-slate-500">Impuesto %<TextInput inputMode="decimal" value={item.taxRate || ""} onChange={(event) => updateItem(index, { taxRate: inputNumber(event.currentTarget.value) })} /></label>
                 </div>
               ))}
               <div className="ml-auto max-w-sm rounded-xl bg-slate-950 p-4 text-white">
