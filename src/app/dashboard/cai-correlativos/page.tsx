@@ -1,10 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge, statusTone } from "@/components/status-badge";
-import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
-import { CaiRange, CaiStatus, caiRanges, invoices, shortDate } from "@/lib/dashboard-data";
+import { ActionButton, EmptyState, MetricCard, TextInput } from "@/components/ui";
+import { CaiRange, CaiStatus, shortDate } from "@/lib/dashboard-data";
 
 type ExtendedCaiStatus = CaiStatus | "BLOQUEADO";
 
@@ -41,15 +41,31 @@ type HistoryRow = {
   comment: string;
 };
 
-const today = new Date("2026-05-05T00:00:00-06:00").getTime();
-const statuses: ExtendedCaiStatus[] = ["ACTIVO", "INACTIVO", "VENCIDO", "AGOTADO", "BLOQUEADO"];
+type DatabaseRange = {
+  id: string; cai: string; range_start: number; range_end: number; current_number: number;
+  expiration_date: string; authorization_date: string; status: string; document_type: string;
+  establishment: string; emission_point: string; branch: string;
+};
 
+type FiscalDocument = {
+  id: string; document_number: string; cai: string; fiscal_correlative: number;
+  created_at: string; customer_name: string; total: string; currency: string;
+};
+
+function inputIsoDate(input: HTMLInputElement) {
+  const selected = input.valueAsDate;
+  return selected && !Number.isNaN(selected.getTime())
+    ? selected.toISOString().slice(0, 10)
+    : input.value;
+}
+
+const today = () => Date.now();
 function available(range: ExtendedCaiRange) {
-  return Math.max(range.final - range.current, 0);
+  return Math.max(range.final - range.current + 1, 0);
 }
 
 function used(range: ExtendedCaiRange) {
-  return Math.max(range.current - range.initial + 1, 0);
+  return Math.max(range.current - range.initial, 0);
 }
 
 function consumedPercent(range: ExtendedCaiRange) {
@@ -58,16 +74,11 @@ function consumedPercent(range: ExtendedCaiRange) {
 }
 
 function daysLeft(range: ExtendedCaiRange) {
-  return Math.ceil((new Date(`${range.limitDate}T00:00:00-06:00`).getTime() - today) / 86_400_000);
+  return Math.ceil((new Date(`${range.limitDate}T23:59:59-06:00`).getTime() - today()) / 86_400_000);
 }
 
-function buildInitialRanges(): ExtendedCaiRange[] {
-  return caiRanges.map((range) => ({
-    ...range,
-    authorizedAt: range.status === "ACTIVO" ? "2026-04-01" : "2025-12-01",
-    office: "Roatan Self Storage",
-    notes: range.status === "ACTIVO" ? "Rango activo para facturación fiscal." : "Rango histórico agotado.",
-  }));
+function fiscalNumber(range: ExtendedCaiRange, value: number) {
+  return `${range.branch}-${range.point}-${range.documentType}-${String(value).padStart(8, "0")}`;
 }
 
 function rangeAlerts(range: ExtendedCaiRange) {
@@ -85,12 +96,9 @@ function rangeAlerts(range: ExtendedCaiRange) {
   return alerts;
 }
 
-function toNumber(value: string) {
-  return Number(value.replaceAll("-", "").replace(/^0+/, "") || 0);
-}
-
 export default function CaiCorrelativosPage() {
-  const [ranges, setRanges] = useState<ExtendedCaiRange[]>(buildInitialRanges);
+  const [ranges, setRanges] = useState<ExtendedCaiRange[]>([]);
+  const [fiscalDocuments, setFiscalDocuments] = useState<FiscalDocument[]>([]);
   const [message, setMessage] = useState("");
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [form, setForm] = useState<CaiForm>({
@@ -102,11 +110,41 @@ export default function CaiCorrelativosPage() {
     limitDate: "",
     documentType: "01",
     branch: "001",
-    point: "002",
+    point: "001",
     office: "Principal",
-    status: "INACTIVO",
+    status: "ACTIVO",
     notes: "",
   });
+
+  const loadFiscalData = useCallback(async () => {
+    const response = await fetch("/api/fiscal", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || "No se pudo cargar la configuración fiscal.");
+    const statusFromDatabase: Record<string, ExtendedCaiStatus> = {
+      ACTIVE: "ACTIVO", INACTIVE: "INACTIVO", EXPIRED: "VENCIDO",
+      EXHAUSTED: "AGOTADO", BLOCKED: "BLOQUEADO",
+    };
+    setRanges((data.ranges as DatabaseRange[]).map((range) => ({
+      id: range.id,
+      cai: range.cai,
+      initial: Number(range.range_start),
+      final: Number(range.range_end),
+      current: Number(range.current_number),
+      limitDate: String(range.expiration_date).slice(0, 10),
+      status: statusFromDatabase[range.status] ?? "INACTIVO",
+      branch: range.establishment,
+      point: range.emission_point,
+      documentType: range.document_type,
+      authorizedAt: String(range.authorization_date).slice(0, 10),
+      office: range.branch,
+      notes: "",
+    })));
+    setFiscalDocuments(data.documents ?? []);
+  }, []);
+
+  useEffect(() => {
+    void loadFiscalData().catch((error) => setMessage(error instanceof Error ? error.message : "No se pudo cargar."));
+  }, [loadFiscalData]);
 
   const active = useMemo(() => ranges.find((range) => range.status === "ACTIVO"), [ranges]);
   const criticalAlerts = useMemo(() => ranges.flatMap(rangeAlerts).filter((alert) => alert.includes("vencido") || alert.includes("agotado") || alert.includes("25")).length, [ranges]);
@@ -127,62 +165,63 @@ export default function CaiCorrelativosPage() {
     };
   }, [active, ranges]);
 
-  const addRange = () => {
-    if (!form.cai || !form.initial || !form.final || !form.current || !form.limitDate) {
-      setMessage("Completa CAI, rango inicial, rango final, correlativo actual y fecha límite.");
+  const addRange = async () => {
+    if (!form.cai || !form.initial || !form.final || !form.current || !form.authorizedAt || !form.limitDate) {
+      setMessage("Completa CAI, fecha de autorización, fecha límite, rango inicial, rango final y correlativo actual.");
       return;
     }
 
-    if (form.status === "ACTIVO" && ranges.some((range) => range.status === "ACTIVO" && range.documentType === form.documentType && range.branch === form.branch && range.point === form.point)) {
-      setMessage("Regla fiscal: solo puede existir un CAI activo por tipo de documento, sucursal y punto de emisión.");
+    const response = await fetch("/api/fiscal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "cai", range: form }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      setMessage(result.message || "No se pudo registrar el CAI.");
       return;
     }
-
-    const nextRange: ExtendedCaiRange = {
-      id: `cai-${Date.now()}`,
-      cai: form.cai,
-      initial: toNumber(form.initial),
-      final: toNumber(form.final),
-      current: toNumber(form.current),
-      limitDate: form.limitDate,
-      status: form.status,
-      branch: form.branch,
-      point: form.point,
-      documentType: form.documentType,
-      authorizedAt: form.authorizedAt,
-      office: form.office,
-      notes: form.notes,
-    };
-
-    setRanges((current) => [nextRange, ...current]);
-    setMessage(`CAI ${form.cai} registrado correctamente. Los cambios aplican solo a nuevas facturas.`);
-    setForm({ cai: "", initial: "", final: "", current: "", authorizedAt: "", limitDate: "", documentType: "01", branch: "001", point: "002", office: "Principal", status: "INACTIVO", notes: "" });
+    if (!result.range?.id || result.range.status !== "ACTIVE") {
+      setMessage("El servidor no confirmó el CAI activo. No se creó ningún correlativo.");
+      return;
+    }
+    await loadFiscalData();
+    setMessage(`CAI ${form.cai} registrado y activado correctamente. Caja ya puede consumir sus correlativos.`);
+    setForm({ cai: "", initial: "", final: "", current: "", authorizedAt: "", limitDate: "", documentType: "01", branch: "001", point: "001", office: "Principal", status: "ACTIVO", notes: "" });
   };
 
-  const updateStatus = (id: string, nextStatus: ExtendedCaiStatus) => {
-    setRanges((current) =>
-      current.map((range) => {
-        if (range.id !== id) {
-          return nextStatus === "ACTIVO" && range.status === "ACTIVO" ? { ...range, status: "INACTIVO" } : range;
-        }
-        return { ...range, status: nextStatus };
-      }),
-    );
-    setMessage(`Rango actualizado a ${nextStatus}. El backend debe asignar correlativos con transacción para evitar duplicados.`);
+  const updateStatus = async (id: string, nextStatus: ExtendedCaiStatus) => {
+    const response = await fetch("/api/fiscal", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, status: nextStatus }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      setMessage(result.message || "No se pudo actualizar el rango.");
+      return;
+    }
+    await loadFiscalData();
+    setMessage(`Rango actualizado a ${nextStatus}. Las nuevas facturas usarán esta configuración.`);
   };
 
   const histories = useMemo<Record<string, HistoryRow[]>>(() => {
     return Object.fromEntries(
       ranges.map((range) => [
         range.id,
-        [
-          { id: `${range.id}-h1`, date: `${range.authorizedAt}T09:00:00-06:00`, user: "Contador", action: "CAI creado", previous: "-", next: String(range.initial), comment: range.notes || "Rango registrado en SAR." },
-          { id: `${range.id}-h2`, date: "2026-05-02T09:18:00-06:00", user: "Sistema", action: "Correlativo consumido", previous: String(range.current - 1), next: String(range.current), invoice: invoices[0]?.number, comment: "Pago BAC aprobado; factura fiscal emitida." },
-          { id: `${range.id}-h3`, date: "2026-05-05T08:00:00-06:00", user: "Sistema", action: "Revisión automática", previous: String(available(range) + 1), next: String(available(range)), comment: "Control de vencimientos y correlativos bajos." },
-        ],
+        fiscalDocuments.filter((document) => document.cai === range.cai).map((document) => ({
+          id: document.id,
+          date: document.created_at,
+          user: "Sistema",
+          action: "Correlativo consumido",
+          previous: String(Math.max(document.fiscal_correlative - 1, 0)),
+          next: String(document.fiscal_correlative),
+          invoice: document.document_number,
+          comment: `Factura emitida a ${document.customer_name} por ${document.currency} ${Number(document.total).toFixed(2)}.`,
+        })),
       ]),
     );
-  }, [ranges]);
+  }, [fiscalDocuments, ranges]);
 
   const visibleHistory = historyFor ? histories[historyFor] ?? [] : [];
 
@@ -219,30 +258,22 @@ export default function CaiCorrelativosPage() {
           </div>
         </section>
 
-        <section className="rounded-lg border border-slate-200 bg-white p-4">
+        <form className="rounded-lg border border-slate-200 bg-white p-4" onSubmit={(event) => { event.preventDefault(); void addRange(); }}>
           <h2 className="mb-4 font-black text-slate-950">Registrar nuevo CAI</h2>
-          <div className="grid gap-3 lg:grid-cols-4">
-            <TextInput placeholder="CAI" value={form.cai} onChange={(event) => setForm({ ...form, cai: event.target.value })} />
-            <TextInput placeholder="Rango inicial: 000-001-01-00000001" value={form.initial} onChange={(event) => setForm({ ...form, initial: event.target.value })} />
-            <TextInput placeholder="Rango final: 000-001-01-00000500" value={form.final} onChange={(event) => setForm({ ...form, final: event.target.value })} />
-            <TextInput placeholder="Correlativo actual" value={form.current} onChange={(event) => setForm({ ...form, current: event.target.value })} />
-            <TextInput type="date" value={form.authorizedAt} onChange={(event) => setForm({ ...form, authorizedAt: event.target.value })} />
-            <TextInput type="date" value={form.limitDate} onChange={(event) => setForm({ ...form, limitDate: event.target.value })} />
-            <TextInput placeholder="Tipo documento" value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value })} />
-            <TextInput placeholder="Establecimiento" value={form.branch} onChange={(event) => setForm({ ...form, branch: event.target.value })} />
-            <TextInput placeholder="Punto de emisión" value={form.point} onChange={(event) => setForm({ ...form, point: event.target.value })} />
-            <TextInput placeholder="Sucursal" value={form.office} onChange={(event) => setForm({ ...form, office: event.target.value })} />
-            <SelectInput value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as ExtendedCaiStatus })}>
-              {statuses.map((item) => <option key={item} value={item}>{item}</option>)}
-            </SelectInput>
-            <TextInput placeholder="Notas" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+          <p className="mb-4 text-sm text-slate-600">Escribe los rangos completos autorizados. El sistema detectará automáticamente establecimiento, punto de emisión y tipo de documento, y dejará este CAI activo para Caja.</p>
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+            <label className="text-xs font-black text-slate-700">CAI<TextInput required placeholder="Escribe el CAI autorizado" value={form.cai} onChange={(event) => setForm({ ...form, cai: event.target.value.toUpperCase() })} /></label>
+            <label className="text-xs font-black text-slate-700">Fecha de autorización<TextInput required type="date" value={form.authorizedAt} onChange={(event) => setForm({ ...form, authorizedAt: inputIsoDate(event.currentTarget) })} /></label>
+            <label className="text-xs font-black text-slate-700">Fecha límite de emisión<TextInput required type="date" value={form.limitDate} onChange={(event) => setForm({ ...form, limitDate: inputIsoDate(event.currentTarget) })} /></label>
+            <label className="text-xs font-black text-slate-700">Rango inicial<TextInput required inputMode="numeric" placeholder="Ejemplo: 1" value={form.initial} onChange={(event) => setForm({ ...form, initial: event.target.value, current: form.current || event.target.value })} /></label>
+            <label className="text-xs font-black text-slate-700">Rango final<TextInput required inputMode="numeric" placeholder="Ejemplo: 1000" value={form.final} onChange={(event) => setForm({ ...form, final: event.target.value })} /></label>
+            <label className="text-xs font-black text-slate-700">Próximo correlativo a utilizar<TextInput required inputMode="numeric" placeholder="Ejemplo: 1" value={form.current} onChange={(event) => setForm({ ...form, current: event.target.value })} /></label>
           </div>
           <div className="mt-3">
-            <ActionButton onClick={addRange}>Registrar nuevo CAI</ActionButton>
+            <ActionButton type="submit">Registrar y activar CAI</ActionButton>
           </div>
-        </section>
-
-        {message ? <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm font-bold text-sky-700">{message}</div> : null}
+          {message ? <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm font-bold text-sky-700">{message}</div> : null}
+        </form>
 
         <section className="rounded-lg border border-slate-200 bg-white">
           <div className="border-b border-slate-200 p-4">
@@ -272,9 +303,9 @@ export default function CaiCorrelativosPage() {
                   {ranges.map((range) => (
                     <tr key={range.id}>
                       <td className="min-w-72 font-mono text-xs">{range.cai}</td>
-                      <td>{range.initial}</td>
-                      <td>{range.final}</td>
-                      <td className="font-black">{range.current}</td>
+                      <td className="font-mono text-xs">{fiscalNumber(range, range.initial)}</td>
+                      <td className="font-mono text-xs">{fiscalNumber(range, range.final)}</td>
+                      <td className="font-mono text-xs font-black">{fiscalNumber(range, range.current)}</td>
                       <td>{available(range)}</td>
                       <td>{used(range)} ({consumedPercent(range)}%)</td>
                       <td>{range.limitDate}</td>
@@ -285,10 +316,14 @@ export default function CaiCorrelativosPage() {
                       <td>
                         <div className="flex min-w-[560px] flex-wrap gap-2">
                           <ActionButton variant="secondary" onClick={() => updateStatus(range.id, "ACTIVO")}>Activar</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => updateStatus(range.id, "INACTIVO")}>Desactivar</ActionButton>
+                          <ActionButton variant="danger" onClick={() => {
+                            if (window.confirm(`¿Dar de baja el CAI ${range.cai}? Caja dejará de utilizar este rango.`)) {
+                              void updateStatus(range.id, "INACTIVO");
+                            }
+                          }}>Dar de baja</ActionButton>
                           <ActionButton variant="secondary" onClick={() => setMessage(`Edición habilitada solo si no hay facturas asociadas al CAI ${range.cai}.`)}>Editar rango</ActionButton>
                           <ActionButton variant="secondary" onClick={() => setHistoryFor(range.id)}>Ver historial</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => setMessage(`${invoices.filter((invoice) => invoice.cai === range.cai).length} facturas asociadas a este CAI.`)}>Ver facturas</ActionButton>
+                          <ActionButton variant="secondary" onClick={() => setMessage(`${fiscalDocuments.filter((invoice) => invoice.cai === range.cai).length} facturas asociadas a este CAI.`)}>Ver facturas</ActionButton>
                           <ActionButton variant="secondary" onClick={() => updateStatus(range.id, "AGOTADO")}>Agotado</ActionButton>
                           <ActionButton onClick={() => updateStatus(range.id, "BLOQUEADO")}>Bloquear</ActionButton>
                         </div>
