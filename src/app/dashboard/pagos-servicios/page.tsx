@@ -271,14 +271,10 @@ export default function PagosServiciosPage() {
   };
   const liveLineValue = (
     index: number,
-    serviceCode: string,
+    _serviceCode: string,
     field: "unitCost" | "marginPercent",
     value: string,
   ) => {
-    const currentLine = assignments[activeUnit]?.[index];
-
-    if (!currentLine || currentLine.serviceCode !== serviceCode) return;
-
     updateLineAt(activeUnit, index, { [field]: value });
   };
   const changeDisplayCurrency = (nextCurrency: "USD" | "HNL") => {
@@ -290,7 +286,6 @@ export default function PagosServiciosPage() {
         Object.entries(current).map(([unitId, unitLines]) => [
           unitId,
           unitLines.map((line) => {
-            const currentCurrency = line.costCurrency ?? displayCurrency;
             const currentCost = decimal(line.unitCost);
             const convertedCost =
               nextCurrency === "HNL"
