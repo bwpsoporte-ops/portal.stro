@@ -38,7 +38,6 @@ const storageCodes = [
   ...Array.from({ length: 5 }, (_, index) => `F${String(index + 1).padStart(2, "0")}`),
   ...Array.from({ length: 5 }, (_, index) => `G${String(index + 1).padStart(2, "0")}`),
 ];
-const grayStorageCodes = new Set(["E01", "E02", "E18", "E20", "C01", "C18", "C19", "C36"]);
 const blankLine = (
   service: Service,
   currency: "USD" | "HNL",
@@ -73,7 +72,6 @@ function StorageMap({ units, customerUnitIds, selected, active, manual, onInspec
     const allowed = manual ? unit.free : owned;
     const isSelected = selected.includes(unit.id);
     const isActive = active === unit.id;
-    const isGray = grayStorageCodes.has(code);
     return (
       <button
         key={code}
@@ -85,9 +83,7 @@ function StorageMap({ units, customerUnitIds, selected, active, manual, onInspec
             ? `z-10 bg-blue-600 text-white ${isActive ? "ring-2 ring-blue-300" : ""}`
             : unit.occupancy
               ? "bg-[#8f8f8f]"
-            : isGray
-              ? "bg-[#aaaaaa]"
-              : "bg-[#59c35b]"
+            : "bg-[#59c35b]"
         }`}
       >
         <span className="-rotate-90 whitespace-nowrap leading-none">{code}</span>
@@ -106,7 +102,7 @@ function StorageMap({ units, customerUnitIds, selected, active, manual, onInspec
     <div className="rounded-2xl border border-sky-100 bg-white p-4 shadow-lg shadow-sky-900/5">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div><h3 className="font-black text-slate-950">Mapa de bodegas</h3><p className="text-xs text-slate-500">Selecciona cualquier código para consultar y configurar la bodega.</p></div>
-        <div className="flex gap-3 text-[10px] font-black"><span className="text-[#42aa45]">■ Disponible</span><span className="text-[#999999]">■ Referencia gris</span><span className="text-blue-700">■ Seleccionada</span></div>
+        <div className="flex gap-3 text-[10px] font-black"><span className="text-[#42aa45]">■ Disponible</span><span className="text-[#999999]">■ Ocupada</span><span className="text-blue-700">■ Seleccionada</span></div>
       </div>
       <div className="relative mx-auto w-full max-w-[820px] overflow-hidden border border-slate-200 bg-white" style={{ aspectRatio: "706 / 395" }}>
         <div className="absolute left-1/2 top-1/2" style={{ width: "55.95%", height: "178.73%", transform: "translate(-50%, -50%) rotate(90deg)" }}>
@@ -498,7 +494,7 @@ export default function PagosServiciosPage() {
                       <strong className="text-sm">Factura eléctrica</strong>
                       <div className="mt-3 grid gap-3 md:grid-cols-4">
                         <label className="text-xs font-black">Consumo kWh<TextInput required inputMode="decimal" placeholder="0" value={line.consumptionKwh} onChange={(event) => updateLineAt(activeUnit, lineIndex, { consumptionKwh: event.currentTarget.value })} /></label>
-                        <label className="text-xs font-black">Tarifa HNL/kWh<TextInput required inputMode="decimal" placeholder="9.9121" value={line.unitCost} onChange={(event) => liveLineValue(lineIndex, service.code, "unitCost", event.currentTarget.value)} /></label>
+                        <label className="text-xs font-black">Tarifa HNL/kWh<TextInput required inputMode="decimal" placeholder="5.9121" value={line.unitCost} onChange={(event) => liveLineValue(lineIndex, service.code, "unitCost", event.currentTarget.value)} /></label>
                         <label className="text-xs font-black">Margen %<TextInput required inputMode="decimal" placeholder="0" value={line.marginPercent} onChange={(event) => liveLineValue(lineIndex, service.code, "marginPercent", event.currentTarget.value)} /></label>
                         <div className="rounded-lg bg-[#004B13] p-3 text-white">
                           <span className="text-xs font-black uppercase">Total a cobrar · {displayCurrency}</span>
