@@ -18,6 +18,7 @@ type MenuItem = {
 const menu: MenuItem[] = [
   { href: "/dashboard/overview", label: "Overview", icon: "grid" },
   { href: "/dashboard/facturas", label: "Facturas", icon: "invoice" },
+  { href: "/dashboard/notas-credito", label: "Notas de crédito", icon: "invoice" },
   { href: "/dashboard/anular-facturas", label: "Anular facturas", icon: "alert" },
   { href: "/dashboard/proformas", label: "Proformas", icon: "template" },
   { href: "/dashboard/caja", label: "Caja", icon: "cash" },
