@@ -1,207 +1,91 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge, statusTone } from "@/components/status-badge";
 import { ActionButton, EmptyState, SelectInput, TextInput } from "@/components/ui";
-import { Invoice, activeCai, invoices, money, shortDate } from "@/lib/dashboard-data";
 
-function InvoicePrintPage({ invoice }: { invoice: Invoice }) {
-  return (
-    <div className="print-area hidden">
-      <article className="print-page bg-white text-slate-900">
-        <header className="grid grid-cols-[1fr_auto] gap-6 border-b border-teal-700 pb-5">
-          <div>
-            <h2 className="text-2xl font-black text-teal-700">Roatan Self Storage</h2>
-            <p className="mt-1 text-sm font-bold">Roatan Self Storage S. de R.L.</p>
-            <p className="mt-2 text-sm text-slate-600">RTN: 08019012345678</p>
-            <p className="text-sm text-slate-600">Coxen Hole, Roatan, Islas de la Bahia, Honduras</p>
-            <p className="text-sm text-slate-600">+504 2400-0000 | facturacion@roatanselfstorage.hn</p>
-          </div>
-          <div className="text-right">
-            <h1 className="text-4xl font-black uppercase text-teal-700">Factura</h1>
-            <p className="mt-2 font-mono text-sm text-slate-600">No. {invoice.number}</p>
-            <div className="mt-4 max-w-72 rounded-md border border-slate-200 bg-slate-50 p-3 text-left">
-              <p className="text-xs font-black uppercase text-slate-500">CAI</p>
-              <p className="mt-1 break-all font-mono text-xs text-slate-800">{invoice.cai}</p>
-            </div>
-          </div>
-        </header>
+type InvoiceDocument = {
+  id: string;
+  document_number: string;
+  source: "CASH" | "SERVICE" | "PROFORMA" | "MANUAL";
+  customer_name: string;
+  customer_email: string | null;
+  customer_rtn: string | null;
+  unit_number: string | null;
+  currency: "USD" | "HNL";
+  subtotal: string;
+  tax: string;
+  total: string;
+  amount_paid: string;
+  credited_amount: string;
+  status: string;
+  cai: string | null;
+  created_at: string;
+  items: Array<{ description: string; total: string }>;
+};
 
-        <section className="grid grid-cols-2 gap-6 border-b border-slate-200 py-5">
-          <div>
-            <p className="text-xs font-black uppercase text-slate-500">Datos del cliente</p>
-            <h3 className="mt-2 text-lg font-black text-slate-950">{invoice.client}</h3>
-            <p className="text-sm text-slate-600">RTN: {invoice.rtn}</p>
-            <p className="text-sm text-slate-600">{invoice.email}</p>
-          </div>
-          <div className="text-right">
-            <p className="text-sm text-slate-600">Fecha de emision: {shortDate(invoice.issuedAt)}</p>
-            <p className="text-sm text-slate-600">Referencia BAC: {invoice.bacReference}</p>
-            <p className="text-sm text-slate-600">
-              Rango autorizado: 001-002-01-{String(activeCai?.initial).padStart(8, "0")} al 001-002-01-{String(activeCai?.final).padStart(8, "0")}
-            </p>
-            <p className="text-sm text-slate-600">Fecha limite: {activeCai?.limitDate}</p>
-          </div>
-        </section>
-
-        <section className="py-5">
-          <table>
-            <thead>
-              <tr>
-                <th>Servicio</th>
-                <th>Cantidad</th>
-                <th>Precio</th>
-                <th>Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Alquiler mensual de unidad de almacenamiento</td>
-                <td>1</td>
-                <td>{money(invoice.amount)}</td>
-                <td className="font-bold">{money(invoice.amount)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section className="ml-auto w-full max-w-sm space-y-3">
-          <div className="flex justify-between text-sm"><span>Subtotal</span><strong>{money(invoice.amount)}</strong></div>
-          <div className="flex justify-between text-sm"><span>ISV 15%</span><strong>{money(invoice.isv)}</strong></div>
-          <div className="flex justify-between rounded-md bg-teal-700 p-4 text-lg font-black text-white">
-            <span>Total</span>
-            <span>{money(invoice.total)}</span>
-          </div>
-        </section>
-
-        <footer className="mt-16 border-t border-slate-200 pt-6 text-center text-xs text-slate-500">
-          <p className="font-bold text-teal-700">La factura es beneficio de todos, exijala.</p>
-          <p className="mt-2">Original: Adquiriente | Copia: Emisor</p>
-        </footer>
-      </article>
-    </div>
-  );
-}
+const money = (value: number, currency: "USD" | "HNL") => new Intl.NumberFormat(currency === "HNL" ? "es-HN" : "en-US", { style: "currency", currency }).format(value || 0);
+const sourceName: Record<string, string> = { CASH: "Caja", SERVICE: "Servicios", PROFORMA: "Proforma", MANUAL: "Manual" };
 
 export default function FacturasPage() {
-  const [client, setClient] = useState("");
-  const [status, setStatus] = useState("TODOS");
+  const [documents, setDocuments] = useState<InvoiceDocument[]>([]);
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("ALL");
+  const [source, setSource] = useState("ALL");
+  const [currency, setCurrency] = useState("ALL");
   const [date, setDate] = useState("");
   const [message, setMessage] = useState("");
-  const [invoiceToPrint, setInvoiceToPrint] = useState<Invoice | null>(null);
+  const [error, setError] = useState("");
 
-  const filtered = useMemo(() => {
-    return invoices.filter((invoice) => {
-      const matchClient = invoice.client.toLowerCase().includes(client.toLowerCase()) || invoice.email.toLowerCase().includes(client.toLowerCase());
-      const matchStatus = status === "TODOS" || invoice.emailStatus === status;
-      const matchDate = !date || invoice.issuedAt.startsWith(date);
-      return matchClient && matchStatus && matchDate;
-    });
-  }, [client, status, date]);
+  const load = useCallback(async () => {
+    const response = await fetch("/api/billing?type=INVOICE", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || "No se pudieron cargar las facturas.");
+    setDocuments(data.documents ?? []);
+  }, []);
 
-  useEffect(() => {
-    if (!invoiceToPrint) return;
+  useEffect(() => { void load().catch((failure) => setError(failure instanceof Error ? failure.message : "No se pudieron cargar las facturas.")); }, [load]);
 
-    const clearInvoice = () => setInvoiceToPrint(null);
-    window.addEventListener("afterprint", clearInvoice, { once: true });
-    const printTimer = window.setTimeout(() => window.print(), 80);
+  const filtered = useMemo(() => documents.filter((invoice) => {
+    const haystack = [invoice.document_number, invoice.customer_name, invoice.customer_email, invoice.customer_rtn, invoice.unit_number, ...invoice.items.map((item) => item.description)].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(search.toLowerCase())
+      && (status === "ALL" || invoice.status === status)
+      && (source === "ALL" || invoice.source === source)
+      && (currency === "ALL" || invoice.currency === currency)
+      && (!date || invoice.created_at.startsWith(date));
+  }), [currency, date, documents, search, source, status]);
 
-    return () => {
-      window.clearTimeout(printTimer);
-      window.removeEventListener("afterprint", clearInvoice);
-    };
-  }, [invoiceToPrint]);
-
-  const downloadInvoice = (invoice: Invoice) => {
-    setMessage(`PDF de factura ${invoice.number} preparado para descarga.`);
-    setInvoiceToPrint(invoice);
-  };
-
-  const resendInvoice = (number: string, email: string) => {
-    setMessage(`Factura ${number} reenviada a ${email}.`);
+  const send = async (id: string) => {
+    setError(""); setMessage("");
+    const response = await fetch(`/api/billing/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "SEND" }) });
+    const result = await response.json();
+    if (!response.ok) { setError(result.message || "No se pudo enviar la factura."); return; }
+    setMessage("Factura enviada por correo con su PDF fiscal.");
+    await load();
   };
 
   return (
     <>
-      <PageHeader
-        title="Facturas"
-        description="Solo consulta de facturas generadas automáticamente después de pagos confirmados. Aquí no se crean facturas manualmente."
-      />
+      <PageHeader title="Facturas" description="Consulta central de todas las facturas fiscales generadas por Caja, Pagos de Servicios y conversiones de proformas." />
       <div className="space-y-5 p-5">
-        <section className="no-print grid gap-3 rounded-lg border border-slate-200 bg-white p-4 md:grid-cols-4">
-          <TextInput placeholder="Filtrar por cliente o correo" value={client} onChange={(event) => setClient(event.target.value)} />
+        <section className="grid gap-3 rounded-lg border border-slate-200 bg-white p-4 md:grid-cols-3 xl:grid-cols-6">
+          <TextInput placeholder="Número, cliente, RTN o bodega" value={search} onChange={(event) => setSearch(event.target.value)} />
           <TextInput type="date" value={date} onChange={(event) => setDate(event.target.value)} />
-          <SelectInput value={status} onChange={(event) => setStatus(event.target.value)}>
-            <option value="TODOS">Todos los estados</option>
-            <option value="ENVIADA">Enviada</option>
-            <option value="PENDIENTE">Pendiente</option>
-            <option value="FALLIDA">Fallida</option>
-          </SelectInput>
-          <ActionButton variant="secondary" onClick={() => { setClient(""); setStatus("TODOS"); setDate(""); }}>
-            Limpiar filtros
-          </ActionButton>
+          <SelectInput value={source} onChange={(event) => setSource(event.target.value)}><option value="ALL">Todos los módulos</option><option value="CASH">Caja</option><option value="SERVICE">Pagos de servicios</option><option value="PROFORMA">Proformas convertidas</option><option value="MANUAL">Manual</option></SelectInput>
+          <SelectInput value={status} onChange={(event) => setStatus(event.target.value)}><option value="ALL">Todos los estados</option><option value="PENDING_PAYMENT">Pendiente</option><option value="PARTIALLY_PAID">Abonada</option><option value="PAID">Pagada</option></SelectInput>
+          <SelectInput value={currency} onChange={(event) => setCurrency(event.target.value)}><option value="ALL">USD y HNL</option><option value="USD">USD $</option><option value="HNL">HNL L</option></SelectInput>
+          <ActionButton variant="secondary" onClick={() => { setSearch(""); setDate(""); setSource("ALL"); setStatus("ALL"); setCurrency("ALL"); }}>Restablecer filtros</ActionButton>
         </section>
 
-        {message ? <div className="no-print rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm font-bold text-sky-700">{message}</div> : null}
+        {message ? <div className="rounded-lg bg-emerald-50 p-3 text-sm font-bold text-emerald-700">{message}</div> : null}
+        {error ? <div className="rounded-lg bg-rose-50 p-3 text-sm font-bold text-rose-700">{error}</div> : null}
 
         <section className="rounded-lg border border-slate-200 bg-white">
-          <div className="border-b border-slate-200 p-4">
-            <h2 className="font-black text-slate-950">Listado de facturas generadas</h2>
-          </div>
-          {filtered.length === 0 ? (
-            <div className="p-4"><EmptyState text="No hay facturas con esos filtros." /></div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Número</th>
-                    <th>Cliente</th>
-                    <th>RTN</th>
-                    <th>Correo</th>
-                    <th>Monto</th>
-                    <th>ISV</th>
-                    <th>Total</th>
-                    <th>CAI / Correlativo</th>
-                    <th>Emisión</th>
-                    <th>Correo</th>
-                    <th>Referencia BAC</th>
-                    <th className="no-print">Acciones</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((invoice) => (
-                    <tr key={invoice.id}>
-                      <td className="font-mono">{invoice.number}</td>
-                      <td className="font-bold text-slate-900">{invoice.client}</td>
-                      <td>{invoice.rtn}</td>
-                      <td>{invoice.email}</td>
-                      <td>{money(invoice.amount)}</td>
-                      <td>{money(invoice.isv)}</td>
-                      <td className="font-black">{money(invoice.total)}</td>
-                      <td>
-                        <p className="font-mono text-xs">{invoice.cai}</p>
-                        <p className="mt-1 text-xs text-slate-500">{invoice.correlative}</p>
-                      </td>
-                      <td>{shortDate(invoice.issuedAt)}</td>
-                      <td><StatusBadge tone={statusTone(invoice.emailStatus)}>{invoice.emailStatus}</StatusBadge></td>
-                      <td>{invoice.bacReference}</td>
-                      <td className="no-print">
-                        <div className="flex gap-2">
-                          <ActionButton variant="secondary" onClick={() => downloadInvoice(invoice)}>PDF</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => resendInvoice(invoice.number, invoice.email)}>Reenviar</ActionButton>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <div className="border-b border-slate-200 p-4"><h2 className="font-black text-slate-950">Facturas de toda la plataforma</h2><p className="text-xs text-slate-500">{filtered.length} factura(s) encontradas</p></div>
+          {!filtered.length ? <div className="p-4"><EmptyState text="No hay facturas con estos filtros." /></div> : <div className="overflow-x-auto"><table><thead><tr><th>Número fiscal</th><th>Origen</th><th>Cliente</th><th>Bodega</th><th>Conceptos</th><th>Total</th><th>Acreditado</th><th>Pagado</th><th>Estado</th><th>Emisión</th><th>Acciones</th></tr></thead><tbody>{filtered.map((invoice) => <tr key={invoice.id}><td><p className="font-mono text-xs font-bold">{invoice.document_number}</p><p className="mt-1 max-w-52 truncate font-mono text-[10px] text-slate-400">CAI: {invoice.cai ?? "-"}</p></td><td>{sourceName[invoice.source] ?? invoice.source}</td><td><strong>{invoice.customer_name}</strong><br /><span className="text-xs text-slate-500">RTN: {invoice.customer_rtn ?? "-"}</span></td><td className="font-black">{invoice.unit_number ? `Bodega ${invoice.unit_number}` : "Global"}</td><td className="max-w-72 text-xs">{invoice.items.map((item) => item.description).join(", ")}</td><td className="font-black">{money(Number(invoice.total), invoice.currency)}</td><td>{money(Number(invoice.credited_amount || 0), invoice.currency)}</td><td>{money(Number(invoice.amount_paid), invoice.currency)}</td><td><StatusBadge tone={statusTone(invoice.status)}>{invoice.status}</StatusBadge></td><td>{new Date(invoice.created_at).toLocaleDateString("es-HN")}</td><td><div className="flex min-w-max gap-2"><a href={`/api/billing/${invoice.id}/pdf`} target="_blank" className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700">PDF fiscal</a><ActionButton variant="secondary" onClick={() => void send(invoice.id)}>Enviar</ActionButton></div></td></tr>)}</tbody></table></div>}
         </section>
       </div>
-      {invoiceToPrint ? <InvoicePrintPage invoice={invoiceToPrint} /> : null}
     </>
   );
 }
