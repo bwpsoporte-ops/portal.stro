@@ -18,10 +18,12 @@ type MenuItem = {
 const menu: MenuItem[] = [
   { href: "/dashboard/overview", label: "Overview", icon: "grid" },
   { href: "/dashboard/facturas", label: "Facturas", icon: "invoice" },
+  { href: "/dashboard/anular-facturas", label: "Anular facturas", icon: "alert" },
   { href: "/dashboard/proformas", label: "Proformas", icon: "template" },
   { href: "/dashboard/caja", label: "Caja", icon: "cash" },
   { href: "/dashboard/pagos-servicios", label: "Pagos de servicios", icon: "services" },
-  { href: "/dashboard/facturas-servicios", label: "emitidos de servicios", icon: "invoice" },
+  { href: "/dashboard/alertas-bodegas", label: "Alertas de bodegas", icon: "alert" },
+  { href: "/dashboard/facturas-servicios", label: "Facturas de servicios", icon: "invoice" },
   { href: "/dashboard/pagos-bac", label: "Pagos BAC", icon: "card" },
   { href: "/dashboard/cai-correlativos", label: "CAI / Correlativos", icon: "shield" },
   { href: "/dashboard/plantilla-factura", label: "Plantilla de Factura", icon: "template" },
