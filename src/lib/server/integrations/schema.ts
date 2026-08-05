@@ -201,6 +201,55 @@ async function createSchema() {
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS exchange_rate numeric(18,6);
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS equivalent_currency text;
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS equivalent_total numeric(14,2);
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS exempt_purchase_order text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS exonerated_registry_number text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS sag_registry_number text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS credited_amount numeric(14,2) NOT NULL DEFAULT 0;
+
+    CREATE TABLE IF NOT EXISTS credit_notes (
+      id text PRIMARY KEY,
+      credit_note_number text NOT NULL UNIQUE,
+      invoice_id text NOT NULL REFERENCES billing_documents(id) ON DELETE RESTRICT,
+      invoice_number text NOT NULL,
+      customer_name text NOT NULL,
+      customer_rtn text,
+      customer_email text,
+      currency text NOT NULL CHECK (currency IN ('USD','HNL')),
+      reason_code text NOT NULL,
+      reason text NOT NULL,
+      resolution text NOT NULL CHECK (resolution IN ('ADJUST_BALANCE','CUSTOMER_CREDIT','BANK_REFUND')),
+      subtotal numeric(14,2) NOT NULL,
+      tax numeric(14,2) NOT NULL,
+      total numeric(14,2) NOT NULL CHECK (total > 0),
+      status text NOT NULL DEFAULT 'ISSUED' CHECK (status IN ('ISSUED','CANCELLED')),
+      cai text NOT NULL,
+      fiscal_correlative integer NOT NULL,
+      fiscal_range text NOT NULL,
+      fiscal_limit_date date NOT NULL,
+      created_by text NOT NULL DEFAULT 'Usuario administrativo',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      cancelled_at timestamptz,
+      cancellation_reason text
+    );
+
+    CREATE TABLE IF NOT EXISTS credit_note_items (
+      id text PRIMARY KEY,
+      credit_note_id text NOT NULL REFERENCES credit_notes(id) ON DELETE CASCADE,
+      description text NOT NULL,
+      subtotal numeric(14,2) NOT NULL,
+      tax_rate numeric(8,3) NOT NULL DEFAULT 0,
+      tax numeric(14,2) NOT NULL,
+      total numeric(14,2) NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credit_note_events (
+      id text PRIMARY KEY,
+      credit_note_id text NOT NULL REFERENCES credit_notes(id) ON DELETE CASCADE,
+      action text NOT NULL,
+      notes text,
+      performed_by text NOT NULL DEFAULT 'Usuario administrativo',
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
 
     CREATE TABLE IF NOT EXISTS billing_document_units (
       document_id text NOT NULL REFERENCES billing_documents(id) ON DELETE CASCADE,
@@ -372,6 +421,10 @@ async function createSchema() {
       ON billing_document_units(unit_label,document_id);
     CREATE INDEX IF NOT EXISTS billing_cancellations_document_idx
       ON billing_document_cancellations(document_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS credit_notes_invoice_idx
+      ON credit_notes(invoice_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS credit_notes_status_idx
+      ON credit_notes(status,created_at DESC);
 
     INSERT INTO service_catalog
       (id, code, name, description, category, calculation_type, unit, sort_order)
