@@ -9,10 +9,11 @@ type Mode = "cash" | "proforma";
 type Customer = { id: string; storeganise_user_id: string; first_name: string | null; last_name: string | null; email: string | null; phone: string | null; address: string | null; billing_data: Record<string, unknown>; invoice_count: number };
 type Unit = { id: string; storeganise_user_id: string; unit_number: string; map_zone: string | null; raw_payload?: Record<string, unknown> };
 type Item = { catalogCode: string; description: string; quantity: number; unitPrice: number; discountPercent: number; taxRate: number };
-type BillingDocument = { id: string; document_number: string; customer_name: string; customer_email: string | null; unit_id: string | null; currency: "USD" | "HNL"; total: string; amount_paid: string; status: string; created_at: string };
+type BillingDocument = { id: string; document_number: string; customer_name: string; customer_email: string | null; unit_id: string | null; currency: "USD" | "HNL"; total: string; amount_paid: string; credited_amount: string; status: string; created_at: string };
 type PeriodFilter = "ALL" | "DAY" | "WEEK" | "MONTH";
 type FiscalConfig = { cai: string; range_start: number; range_end: number; current_number: number; expiration_date: string; establishment: string; emission_point: string; document_type: string };
 type Occupancy = { unit_code: string; unit_id: string | null; customer_id: string | null; customer_key: string; customer_name: string; customer_email: string | null; next_due_date: string };
+type BankPaymentMethod = "transfer" | "card";
 
 const money = (value: number, currency: "USD" | "HNL") => new Intl.NumberFormat(currency === "HNL" ? "es-HN" : "en-US", { style: "currency", currency }).format(value || 0);
 const inputNumber = (value: string) => {
@@ -58,6 +59,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   const [customer, setCustomer] = useState({ name: "", email: "", phone: "", rtn: "", address: "" });
   const [items, setItems] = useState<Item[]>([blankItem()]);
   const [notes, setNotes] = useState("");
+  const [fiscalReferences, setFiscalReferences] = useState({ exemptPurchaseOrder: "", exoneratedRegistryNumber: "", sagRegistryNumber: "" });
   const [currency, setCurrency] = useState<"USD" | "HNL">("USD");
   const [usdToHnl, setUsdToHnl] = useState(0);
   const [message, setMessage] = useState("");
@@ -68,6 +70,12 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   const [historyPeriod, setHistoryPeriod] = useState<PeriodFilter>("ALL");
   const [fiscal, setFiscal] = useState<FiscalConfig | null>(null);
   const [occupancies, setOccupancies] = useState<Occupancy[]>([]);
+  const [paymentDocument, setPaymentDocument] = useState<BillingDocument | null>(null);
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [bankPaymentMethod, setBankPaymentMethod] = useState<BankPaymentMethod>("transfer");
+  const [bankReference, setBankReference] = useState("");
+  const [reconciliationNotes, setReconciliationNotes] = useState("");
+  const [paymentSaving, setPaymentSaving] = useState(false);
 
   const load = useCallback(async () => {
     const [response, exchangeResponse] = await Promise.all([
@@ -107,10 +115,11 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   const filteredCustomers = customers.filter((entry) =>
     [entry.first_name, entry.last_name, entry.email].filter(Boolean).join(" ").toLowerCase().includes(search.toLowerCase()),
   ).slice(0, 8);
+  const hasFiscalExemption = Object.values(fiscalReferences).some((value) => value.trim().length > 0);
   const totals = items.reduce((sum, item) => {
     const gross = item.quantity * item.unitPrice;
     const discounted = gross * (1 - item.discountPercent / 100);
-    return { subtotal: sum.subtotal + discounted, tax: sum.tax + discounted * item.taxRate / 100 };
+    return { subtotal: sum.subtotal + discounted, tax: sum.tax + discounted * (hasFiscalExemption ? 0 : item.taxRate) / 100 };
   }, { subtotal: 0, tax: 0 });
   const total = totals.subtotal + totals.tax;
   const filteredDocuments = useMemo(() => documents.filter((document) =>
@@ -181,7 +190,10 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
           unitId: selectedUnits[0]?.unitId,
           unitLabel: selectedUnits.map((entry) => entry.unitLabel).join(", ") || undefined,
           unitAssignments: selectedUnits.map((entry) => ({ unitId: entry.unitId, unitLabel: entry.unitLabel })),
-          customer: manual ? customer : undefined, items, notes,
+          customer: manual ? customer : undefined,
+          items: items.map((item) => ({ ...item, taxRate: hasFiscalExemption ? 0 : item.taxRate })),
+          notes,
+          ...fiscalReferences,
           status: isProforma ? (status ?? "DRAFT") : "PENDING_PAYMENT", currency,
           exchangeRate: usdToHnl || undefined,
           equivalentCurrency: currency === "USD" ? "HNL" : "USD",
@@ -192,7 +204,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
       });
       const data = await response.json(); if (!response.ok) throw new Error(data.message);
       setMessage(`${isProforma ? "Proforma" : "Factura"} ${data.document.documentNumber} creada por ${money(Number(data.document.total), currency)}.`);
-      setItems([blankItem()]); setNotes(""); setSelectedUnits([]); await load();
+      setItems([blankItem()]); setNotes(""); setFiscalReferences({ exemptPurchaseOrder: "", exoneratedRegistryNumber: "", sagRegistryNumber: "" }); setSelectedUnits([]); await load();
     } catch (e) { setError(e instanceof Error ? e.message : "No se pudo guardar."); } finally { setSaving(false); }
   };
 
@@ -207,19 +219,30 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   };
 
   const registerPayment = async (document: BillingDocument) => {
-    const balance = Number(document.total) - Number(document.amount_paid);
-    const entered = window.prompt(`Saldo actual: ${money(balance, document.currency)}. Ingresa el pago o abono:`, balance.toFixed(2));
-    if (entered === null) return;
-    const amount = Number(entered);
-    if (!Number.isFinite(amount) || amount <= 0) { setError("El pago debe ser mayor que cero."); return; }
+    const balance = Math.max(0, Number(document.total) - Number(document.credited_amount || 0) - Number(document.amount_paid));
+    setPaymentDocument(document);
+    setPaymentAmount(balance.toFixed(2));
+    setBankPaymentMethod("transfer");
+    setBankReference("");
+    setReconciliationNotes("");
+    setError("");
+  };
+
+  const confirmBankPayment = async () => {
+    if (!paymentDocument) return;
+    const amount = inputNumber(paymentAmount);
+    if (amount <= 0) { setError("El pago debe ser mayor que cero."); return; }
+    if (!bankReference.trim()) { setError("Ingresa la referencia, autorización o comprobante bancario."); return; }
+    setPaymentSaving(true); setError("");
     try {
-      const response = await fetch(`/api/billing/${document.id}`, {
+      const response = await fetch(`/api/billing/${paymentDocument.id}`, {
         method: "PATCH", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "PAY", amount, method: "cash", reference: "CAJA" }),
+        body: JSON.stringify({ action: "PAY", amount, method: bankPaymentMethod, reference: bankReference.trim(), notes: reconciliationNotes.trim() }),
       });
       const data = await response.json(); if (!response.ok) throw new Error(data.message);
-      setMessage(`Pago en caja de ${money(amount, document.currency)} registrado correctamente.`); await load();
-    } catch (e) { setError(e instanceof Error ? e.message : "No se pudo registrar el pago."); }
+      setMessage(`${bankPaymentMethod === "transfer" ? "Transferencia bancaria" : "Pago por POS"} de ${money(amount, paymentDocument.currency)} registrado para conciliación.`);
+      setPaymentDocument(null); await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "No se pudo registrar el pago."); } finally { setPaymentSaving(false); }
   };
 
   return (
@@ -293,6 +316,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
                 <p className="flex justify-between text-sm"><span>Subtotal</span><strong>{money(totals.subtotal, currency)}</strong></p><p className="mt-2 flex justify-between text-sm"><span>Impuestos</span><strong>{money(totals.tax, currency)}</strong></p><p className="mt-3 flex justify-between border-t border-white/20 pt-3 text-xl font-black"><span>Total</span><span>{money(total, currency)}</span></p>
               </div>
               <textarea className="min-h-20 w-full rounded-lg border border-slate-200 p-3 text-sm" placeholder="Notas y condiciones" value={notes} onChange={(e) => setNotes(e.target.value)} />
+              {!isProforma ? <section className="rounded-xl border border-amber-200 bg-amber-50 p-4"><div><h3 className="text-sm font-black text-amber-950">Referencias de exención o exoneración</h3><p className="mt-1 text-xs text-amber-800">Déjalas vacías para cobrar el ISV normalmente. Al ingresar cualquiera, la factura se emitirá sin ISV y conservará el código en el PDF.</p></div><div className="mt-3 grid gap-3"><label className="text-xs font-black text-slate-700">No. Orden de compra exenta<TextInput placeholder="Código de la orden exenta" value={fiscalReferences.exemptPurchaseOrder} onChange={(event) => setFiscalReferences((current) => ({ ...current, exemptPurchaseOrder: event.currentTarget.value }))} /></label><label className="text-xs font-black text-slate-700">No. Constancia del registro exonerado<TextInput placeholder="Número de constancia" value={fiscalReferences.exoneratedRegistryNumber} onChange={(event) => setFiscalReferences((current) => ({ ...current, exoneratedRegistryNumber: event.currentTarget.value }))} /></label><label className="text-xs font-black text-slate-700">No. Identificativo del registro de la SAG<TextInput placeholder="Identificativo SAG" value={fiscalReferences.sagRegistryNumber} onChange={(event) => setFiscalReferences((current) => ({ ...current, sagRegistryNumber: event.currentTarget.value }))} /></label></div>{hasFiscalExemption ? <div className="mt-3 rounded-lg bg-emerald-100 p-3 text-xs font-black text-emerald-900">Exención activa: ISV 0%. El código quedará registrado en la factura.</div> : null}</section> : null}
               <div className="flex flex-wrap justify-end gap-2">{isProforma ? <><ActionButton variant="secondary" type="submit">{saving ? "Guardando..." : "Guardar borrador"}</ActionButton><ActionButton onClick={() => { const form = document.querySelector("form"); if (form) void submit({ preventDefault: () => {} } as FormEvent, "SENT"); }}>Guardar como enviada</ActionButton></> : <ActionButton type="submit">{saving ? "Facturando..." : "Crear factura"}</ActionButton>}</div>
             </section>
           </div>
@@ -301,9 +325,10 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
         {message ? <p className="rounded-lg bg-emerald-50 p-4 text-sm font-bold text-emerald-700">{message}</p> : null}{error ? <p className="rounded-lg bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</p> : null}
         <section className="rounded-lg border border-slate-200 bg-white">
           <div className="flex flex-col gap-3 border-b p-4 md:flex-row md:items-center md:justify-between"><h2 className="font-black">Historial de {isProforma ? "proformas" : "facturas de caja"}</h2><div className="flex flex-wrap gap-2"><TextInput placeholder="Cliente o número" value={historySearch} onChange={(e) => setHistorySearch(e.target.value)} /><SelectInput value={historyPeriod} onChange={(e) => setHistoryPeriod(e.target.value as PeriodFilter)}><option value="ALL">Todo el historial</option><option value="DAY">Hoy</option><option value="WEEK">Esta semana</option><option value="MONTH">Este mes</option></SelectInput><SelectInput value={historyStatus} onChange={(e) => setHistoryStatus(e.target.value)}><option value="ALL">Todos</option>{isProforma ? <><option value="DRAFT">Borrador</option><option value="SENT">Enviada</option><option value="ACCEPTED">Aceptada</option><option value="REJECTED">Rechazada</option><option value="CONVERTED">Convertida</option></> : <><option value="PENDING_PAYMENT">Pendiente</option><option value="PARTIALLY_PAID">Abonada</option><option value="PAID">Pagada</option></>}</SelectInput></div></div>
-          {!filteredDocuments.length ? <div className="p-4"><EmptyState text="Aún no hay documentos con estos filtros." /></div> : <div className="overflow-auto"><table><thead><tr><th>Número</th><th>Cliente</th><th>Total</th><th>Pagado</th><th>Estado</th><th>Fecha</th><th>Acciones</th></tr></thead><tbody>{filteredDocuments.map((doc) => <tr key={doc.id}><td className="font-mono text-xs">{doc.document_number}</td><td><strong>{doc.customer_name}</strong><br /><span className="text-xs">{doc.customer_email}</span></td><td className="font-black">{money(Number(doc.total), doc.currency)}</td><td>{money(Number(doc.amount_paid), doc.currency)}</td><td>{doc.status}</td><td>{new Date(doc.created_at).toLocaleDateString("es-HN")}</td><td><div className="flex min-w-max gap-2"><a className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700" href={`/api/billing/${doc.id}/pdf`} target="_blank">PDF</a><ActionButton variant="secondary" onClick={() => void action(doc.id, "SEND")}>Enviar correo</ActionButton>{!isProforma && doc.status !== "PAID" ? <ActionButton onClick={() => void registerPayment(doc)}>Registrar pago</ActionButton> : null}{isProforma && !["CONVERTED", "REJECTED"].includes(doc.status) ? <><ActionButton variant="secondary" onClick={() => void action(doc.id, "ACCEPTED")}>Aceptar</ActionButton><ActionButton variant="danger" onClick={() => void action(doc.id, "REJECTED")}>Rechazar</ActionButton><ActionButton onClick={() => void action(doc.id, "CONVERT")}>Convertir en factura</ActionButton></> : null}</div></td></tr>)}</tbody></table></div>}
+          {!filteredDocuments.length ? <div className="p-4"><EmptyState text="Aún no hay documentos con estos filtros." /></div> : <div className="overflow-auto"><table><thead><tr><th>Número</th><th>Cliente</th><th>Total</th><th>Acreditado</th><th>Pagado</th><th>Estado</th><th>Fecha</th><th>Acciones</th></tr></thead><tbody>{filteredDocuments.map((doc) => <tr key={doc.id}><td className="font-mono text-xs">{doc.document_number}</td><td><strong>{doc.customer_name}</strong><br /><span className="text-xs">{doc.customer_email}</span></td><td className="font-black">{money(Number(doc.total), doc.currency)}</td><td>{money(Number(doc.credited_amount || 0), doc.currency)}</td><td>{money(Number(doc.amount_paid), doc.currency)}</td><td>{doc.status}</td><td>{new Date(doc.created_at).toLocaleDateString("es-HN")}</td><td><div className="flex min-w-max gap-2"><a className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700" href={`/api/billing/${doc.id}/pdf`} target="_blank">PDF</a><ActionButton variant="secondary" onClick={() => void action(doc.id, "SEND")}>Enviar correo</ActionButton>{!isProforma && !["PAID","CREDITED"].includes(doc.status) ? <ActionButton onClick={() => void registerPayment(doc)}>Registrar pago</ActionButton> : null}{isProforma && !["CONVERTED", "REJECTED"].includes(doc.status) ? <><ActionButton variant="secondary" onClick={() => void action(doc.id, "ACCEPTED")}>Aceptar</ActionButton><ActionButton variant="danger" onClick={() => void action(doc.id, "REJECTED")}>Rechazar</ActionButton><ActionButton onClick={() => void action(doc.id, "CONVERT")}>Convertir en factura</ActionButton></> : null}</div></td></tr>)}</tbody></table></div>}
         </section>
       </div>
+      {paymentDocument ? <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4"><section className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl"><p className="text-xs font-black uppercase text-[#004B13]">Conciliación bancaria</p><h2 className="mt-1 text-xl font-black">Registrar pago de {paymentDocument.document_number}</h2><p className="mt-2 text-sm text-slate-600">Selecciona cómo ingresó el dinero y registra el número que aparece en el banco o comprobante POS.</p><div className="mt-5 space-y-3"><label className="block text-xs font-black">Monto ({paymentDocument.currency})<TextInput required inputMode="decimal" value={paymentAmount} onChange={(event) => setPaymentAmount(event.currentTarget.value)} /></label><label className="block text-xs font-black">Método de pago<SelectInput value={bankPaymentMethod} onChange={(event) => setBankPaymentMethod(event.currentTarget.value as BankPaymentMethod)}><option value="transfer">Transferencia bancaria</option><option value="card">POS bancario (tarjeta)</option></SelectInput></label><label className="block text-xs font-black">{bankPaymentMethod === "transfer" ? "Referencia de transferencia" : "Número de autorización POS"}<TextInput required placeholder={bankPaymentMethod === "transfer" ? "Ejemplo: transferencia 847392" : "Ejemplo: autorización 193847"} value={bankReference} onChange={(event) => setBankReference(event.currentTarget.value)} /></label><label className="block text-xs font-black">Nota para conciliación<textarea className="mt-1 min-h-20 w-full rounded-md border border-slate-200 p-3 text-sm" placeholder="Banco, fecha, cuenta receptora u observaciones." value={reconciliationNotes} onChange={(event) => setReconciliationNotes(event.currentTarget.value)} /></label></div><div className="mt-5 flex justify-end gap-2"><ActionButton variant="secondary" onClick={() => setPaymentDocument(null)}>Cancelar</ActionButton><button type="button" onClick={() => void confirmBankPayment()} disabled={paymentSaving} className="rounded-md bg-[#004B13] px-4 py-2 text-sm font-black text-white disabled:opacity-50">{paymentSaving ? "Registrando…" : "Registrar y conciliar"}</button></div></section></div> : null}
     </>
   );
 }
