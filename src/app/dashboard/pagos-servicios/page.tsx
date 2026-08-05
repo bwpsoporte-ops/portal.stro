@@ -19,8 +19,6 @@ const usd = (value: number) => new Intl.NumberFormat("en-US", { style: "currency
 const hnl = (value: number) => new Intl.NumberFormat("es-HN", { style: "currency", currency: "HNL" }).format(roundMoney(value));
 const documentMoney = (value: number, currency: "USD" | "HNL") =>
   currency === "HNL" ? hnl(value) : usd(value);
-const RECO_GENERAL_FIXED_HNL = 38.0265;
-const RECO_GENERAL_KWH_HNL = 7.2345;
 const matchesPeriod = (dateValue: string, period: PeriodFilter) => {
   if (period === "ALL") return true;
   const date = new Date(dateValue); const now = new Date();
@@ -52,7 +50,7 @@ const blankLine = (
   quantity: "1",
   unitCost: "",
   marginPercent: "",
-  costCurrency: currency,
+  costCurrency: service.code === "ELECTRICITY" ? "HNL" : currency,
 });
 const decimal = (value: string | number) => {
   const normalized = String(value)
@@ -286,6 +284,9 @@ export default function PagosServiciosPage() {
         Object.entries(current).map(([unitId, unitLines]) => [
           unitId,
           unitLines.map((line) => {
+            if (line.serviceCode === "ELECTRICITY") {
+              return { ...line, costCurrency: "HNL" as const };
+            }
             const currentCost = decimal(line.unitCost);
             const convertedCost =
               nextCurrency === "HNL"
@@ -296,7 +297,9 @@ export default function PagosServiciosPage() {
               ...line,
               costCurrency: nextCurrency,
               unitCost: currentCost
-                ? roundMoney(convertedCost).toFixed(2)
+                ? line.serviceCode === "ELECTRICITY"
+                  ? (Math.round(convertedCost * 10_000) / 10_000).toFixed(4)
+                  : roundMoney(convertedCost).toFixed(2)
                 : "",
             };
           }),
@@ -305,26 +308,12 @@ export default function PagosServiciosPage() {
     );
     setDisplayCurrency(nextCurrency);
   };
-  const electricityAmountHnl = (line: Line) =>
-    line.costCurrency === "USD"
-      ? decimal(line.unitCost) * usdToHnl
-      : decimal(line.unitCost);
-  const electricityKwh = (line: Line) =>
-    roundMoney(
-      Math.max(
-        0,
-        (electricityAmountHnl(line) - RECO_GENERAL_FIXED_HNL) /
-          RECO_GENERAL_KWH_HNL,
-      ),
-    );
   const lineQuantity = (line: Line) => {
     const isElectricity =
       line.serviceCode === "ELECTRICITY" ||
       (!line.serviceCode && line.description === labels.ELECTRICITY);
 
-    // La factura de RECO es un recibo completo. Su total ya incluye consumo,
-    // cargo fijo y cualquier otro concepto; no se vuelve a multiplicar por kWh.
-    return isElectricity ? 1 : decimal(line.quantity);
+    return isElectricity ? decimal(line.consumptionKwh) : decimal(line.quantity);
   };
   const lineUnitPrice = (line: Line) => {
     const cost =
@@ -337,7 +326,21 @@ export default function PagosServiciosPage() {
 
     return roundMoney(cost + cost * (margin / 100));
   };
+  const electricityTotalHnl = (line: Line) => {
+    const consumptionKwh = decimal(line.consumptionKwh);
+    const tariffHnl = decimal(line.unitCost);
+    const margin = decimal(line.marginPercent);
+    const subtotal = consumptionKwh * tariffHnl;
+    const marginAmount = subtotal * (margin / 100);
+
+    return roundMoney(subtotal + marginAmount);
+  };
   const lineTotal = (line: Line) => {
+    if (line.serviceCode === "ELECTRICITY") {
+      return usdToHnl > 0
+        ? roundMoney(electricityTotalHnl(line) / usdToHnl)
+        : 0;
+    }
     return roundMoney(lineQuantity(line) * lineUnitPrice(line));
   };
   const unitTotal = (unitId: string) =>
@@ -348,7 +351,7 @@ export default function PagosServiciosPage() {
       ),
     );
   // Una sola fuente de verdad para los importes visibles y para la factura.
-  // Electricidad: total del recibo + margen, sin multiplicarlo por los kWh.
+  // Electricidad: consumo manual × tarifa manual por kWh, más el margen.
   const totals = (() => {
     const subtotal = roundMoney(selectedUnits.reduce((sum, id) => sum + unitTotal(id), 0));
     const tax = roundMoney(subtotal * decimal(taxRate) / 100);
@@ -381,9 +384,15 @@ export default function PagosServiciosPage() {
           const service = services.find((entry) => entry.id === line.serviceId)!;
           const quantity = lineQuantity(line);
           const unitPriceUsd = lineUnitPrice(line);
+          if (line.serviceCode === "ELECTRICITY" && quantity <= 0) {
+            throw new Error(`Escribe el consumo kWh de la bodega ${unit.unit_number}.`);
+          }
+          if (decimal(line.unitCost) <= 0) {
+            throw new Error(`Escribe ${line.serviceCode === "ELECTRICITY" ? "la tarifa por kWh" : "el costo"} de la bodega ${unit.unit_number}.`);
+          }
           const electricityDetail =
             line.serviceCode === "ELECTRICITY"
-              ? ` · ${electricityKwh(line)} kWh estimados · Recibo ${line.costCurrency ?? "HNL"} ${decimal(line.unitCost).toFixed(2)}`
+              ? ` · ${decimal(line.consumptionKwh).toFixed(2)} kWh · Tarifa ${line.costCurrency ?? "HNL"} ${decimal(line.unitCost).toFixed(4)}/kWh · Margen ${decimal(line.marginPercent).toFixed(2)}%`
               : "";
 
           return {
@@ -454,7 +463,7 @@ export default function PagosServiciosPage() {
                   return <button disabled={!inspectedSelectable} type="button" onClick={() => toggleServiceForUnit(inspectedUnit, service)} key={service.id} className={`rounded-lg border p-3 text-left text-xs font-black transition ${configured ? "border-sky-500 bg-sky-50 text-sky-800" : inspectedSelectable ? "border-slate-200 text-slate-600 hover:border-sky-300 hover:bg-sky-50" : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"}`}><span className={`mr-2 inline-flex h-5 w-5 items-center justify-center rounded border ${configured ? "bg-sky-600 text-white" : ""}`}>{configured ? "✓" : ""}</span>{labels[service.code] ?? service.name}</button>;
                 })}</div>
                 <h3 className="mt-5 font-black">Configuración actual</h3>
-                {inspectedConfigured.length ? <div className="mt-2 space-y-2">{inspectedConfigured.map((line) => <div key={line.serviceId} className="rounded-lg bg-slate-50 p-3"><div className="flex justify-between"><strong>{line.description}</strong><strong>{usd(lineTotal(line))}</strong></div><p className="text-xs text-slate-500">{line.consumptionKwh ? `${line.consumptionKwh} kWh` : `Cantidad ${line.quantity}`} · Costo ${usd(Number(line.unitCost))} · Margen ${line.marginPercent}%</p></div>)}</div> : <EmptyState text="Todavía no seleccionaste servicios para esta bodega." />}
+                {inspectedConfigured.length ? <div className="mt-2 space-y-2">{inspectedConfigured.map((line) => <div key={line.serviceId} className="rounded-lg bg-slate-50 p-3"><div className="flex justify-between"><strong>{line.description}</strong><strong>{usd(lineTotal(line))}</strong></div><p className="text-xs text-slate-500">{line.serviceCode === "ELECTRICITY" ? `${line.consumptionKwh || "0"} kWh · Tarifa ${line.costCurrency} ${line.unitCost || "0"}/kWh` : `Cantidad ${line.quantity} · Costo ${line.costCurrency} ${line.unitCost || "0"}`} · Margen ${line.marginPercent || "0"}%</p></div>)}</div> : <EmptyState text="Todavía no seleccionaste servicios para esta bodega." />}
               </div>
               <div>
                 <h3 className="font-black">Facturas y cargos históricos</h3>
@@ -468,7 +477,55 @@ export default function PagosServiciosPage() {
         </div>
       ) : null}
       <section className="rounded-2xl border border-sky-100 bg-white p-5 shadow-lg"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-black uppercase text-sky-600">Configuración visible</p><h2 className="text-lg font-black">Cargos por bodega</h2><div className="mt-2 inline-flex rounded-lg bg-slate-100 p-1"><button type="button" onClick={() => changeDisplayCurrency("USD")} className={`rounded-md px-3 py-1 text-xs font-black ${displayCurrency === "USD" ? "bg-sky-600 text-white shadow" : "text-slate-600"}`}>USD $</button><button type="button" disabled={!usdToHnl} onClick={() => changeDisplayCurrency("HNL")} className={`rounded-md px-3 py-1 text-xs font-black disabled:opacity-40 ${displayCurrency === "HNL" ? "bg-sky-600 text-white shadow" : "text-slate-600"}`}>HNL L</button></div></div><div className="rounded-xl bg-slate-950 px-5 py-3 text-right text-white"><p className="text-[10px] font-black uppercase text-slate-300">Total global · {displayCurrency}</p><p className="text-2xl font-black">{displayMoney(grandTotal)}</p></div></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{selectedUnits.map((id) => { const unit = mapUnits.find((entry) => entry.id === id)!; return <button key={id} type="button" onClick={() => setActiveUnit(id)} className={`rounded-xl border p-4 text-left transition ${activeUnit === id ? "border-blue-600 bg-blue-600 text-white shadow-lg shadow-blue-900/20" : "border-slate-200 bg-slate-50"}`}><span className="text-xs font-black uppercase opacity-70">Bodega</span><span className="block text-xl font-black">{unit.unit_number}</span><span className="mt-2 flex justify-between text-xs"><span>{(assignments[id] ?? []).length} servicio(s)</span><strong>{displayMoney(unitTotal(id))}</strong></span><span onClick={(event) => { event.stopPropagation(); removeUnit(id); }} className="mt-3 inline-block text-xs font-black opacity-70 hover:opacity-100">Quitar bodega ×</span></button>; })}</div>{!selectedUnits.length ? <div className="mt-4"><EmptyState text="Selecciona una bodega en el mapa para configurar sus servicios. Esta sección permanecerá visible." /></div> : null}
-        {activeUnit ? <div className="mt-5 grid gap-5 xl:grid-cols-[280px_1fr]"><div><h3 className="font-black">Cargos para bodega {mapUnits.find((unit) => unit.id === activeUnit)?.unit_number}</h3><div className="mt-3 grid grid-cols-2 gap-2">{billable.map((service) => { const checked = lines.some((line) => line.serviceId === service.id); return <button key={service.id} type="button" onClick={() => toggleService(service)} className={`flex items-center gap-2 rounded-lg border p-2 text-left text-xs font-black ${checked ? "border-sky-500 bg-sky-50" : "border-slate-200"}`}><span className={`flex h-5 w-5 items-center justify-center rounded border ${checked ? "bg-sky-600 text-white" : ""}`}>{checked ? "✓" : ""}</span>{labels[service.code] ?? service.name}</button>; })}</div><div className="mt-4 rounded-xl bg-sky-50 p-4"><p className="text-xs font-black uppercase text-sky-600">Total bodega en vivo · {displayCurrency}</p><p className="text-2xl font-black text-sky-900">{displayMoney(unitTotal(activeUnit))}</p></div></div><div className="space-y-3">{lines.map((line, lineIndex) => { const service = services.find((entry) => entry.id === line.serviceId)!; return <div key={`${activeUnit}-${line.serviceId}-${lineIndex}`} className="grid gap-2 rounded-xl border bg-slate-50 p-3 md:grid-cols-6"><div><strong className="text-sm">{labels[service.code] ?? service.name}</strong><TextInput placeholder="Descripción" value={line.description} onChange={(event) => updateLineAt(activeUnit, lineIndex, { description: event.currentTarget.value })} /></div>{service.code === "ELECTRICITY" ? <div className="rounded-md border border-sky-100 bg-white p-2"><span className="text-xs font-black">Consumo estimado</span><strong className="mt-1 block text-xs text-slate-700">{electricityKwh(line)} kWh estimados</strong><span className="block text-[10px] text-slate-500">Tarifa: L{RECO_GENERAL_KWH_HNL}/kWh + L{RECO_GENERAL_FIXED_HNL} fijo</span></div> : <label className="text-xs font-black">Cantidad<TextInput required inputMode="decimal" placeholder="0" value={line.quantity} onChange={(event) => updateLineAt(activeUnit, lineIndex, { quantity: event.currentTarget.value })} /></label>}<label className="text-xs font-black">{service.code === "ELECTRICITY" ? "Total recibo" : "Costo"}<TextInput required inputMode="decimal" placeholder="0" value={line.unitCost} onChange={(event) => liveLineValue(lineIndex, service.code, "unitCost", event.currentTarget.value)} /></label><label className="text-xs font-black">Margen %<TextInput required inputMode="decimal" placeholder="0" value={line.marginPercent} onChange={(event) => liveLineValue(lineIndex, service.code, "marginPercent", event.currentTarget.value)} /></label><div className="rounded-lg bg-emerald-50 p-3"><span className="text-xs">Precio automático · {displayCurrency}</span><strong className="block text-lg">{displayMoney(lineUnitPrice(line))}</strong><span className="text-xs font-black text-emerald-800">Total: {displayMoney(lineTotal(line))}</span></div></div>; })}{!lines.length ? <EmptyState text="Marca los servicios que corresponden a esta bodega." /> : null}</div></div> : null}
+        {activeUnit ? (
+          <div className="mt-5 grid gap-5 xl:grid-cols-[280px_1fr]">
+            <div>
+              <h3 className="font-black">Cargos para bodega {mapUnits.find((unit) => unit.id === activeUnit)?.unit_number}</h3>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {billable.map((service) => {
+                  const checked = lines.some((line) => line.serviceId === service.id);
+                  return <button key={service.id} type="button" onClick={() => toggleService(service)} className={`flex items-center gap-2 rounded-lg border p-2 text-left text-xs font-black ${checked ? "border-sky-500 bg-sky-50" : "border-slate-200"}`}><span className={`flex h-5 w-5 items-center justify-center rounded border ${checked ? "bg-sky-600 text-white" : ""}`}>{checked ? "✓" : ""}</span>{labels[service.code] ?? service.name}</button>;
+                })}
+              </div>
+              <div className="mt-4 rounded-xl bg-sky-50 p-4"><p className="text-xs font-black uppercase text-sky-600">Total bodega en vivo · {displayCurrency}</p><p className="text-2xl font-black text-sky-900">{displayMoney(unitTotal(activeUnit))}</p></div>
+            </div>
+            <div className="space-y-3">
+              {lines.map((line, lineIndex) => {
+                const service = services.find((entry) => entry.id === line.serviceId)!;
+                if (service.code === "ELECTRICITY") {
+                  return (
+                    <div key={`${activeUnit}-${line.serviceId}-${lineIndex}`} className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
+                      <strong className="text-sm">Factura eléctrica</strong>
+                      <div className="mt-3 grid gap-3 md:grid-cols-4">
+                        <label className="text-xs font-black">Consumo kWh<TextInput required inputMode="decimal" placeholder="0" value={line.consumptionKwh} onChange={(event) => updateLineAt(activeUnit, lineIndex, { consumptionKwh: event.currentTarget.value })} /></label>
+                        <label className="text-xs font-black">Tarifa HNL/kWh<TextInput required inputMode="decimal" placeholder="9.9121" value={line.unitCost} onChange={(event) => liveLineValue(lineIndex, service.code, "unitCost", event.currentTarget.value)} /></label>
+                        <label className="text-xs font-black">Margen %<TextInput required inputMode="decimal" placeholder="0" value={line.marginPercent} onChange={(event) => liveLineValue(lineIndex, service.code, "marginPercent", event.currentTarget.value)} /></label>
+                        <div className="rounded-lg bg-[#004B13] p-3 text-white">
+                          <span className="text-xs font-black uppercase">Total a cobrar · {displayCurrency}</span>
+                          <strong className="mt-1 block text-xl">
+                            {displayCurrency === "HNL"
+                              ? hnl(electricityTotalHnl(line))
+                              : usd(usdToHnl > 0 ? electricityTotalHnl(line) / usdToHnl : 0)}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div key={`${activeUnit}-${line.serviceId}-${lineIndex}`} className="grid gap-2 rounded-xl border bg-slate-50 p-3 md:grid-cols-6">
+                    <div><strong className="text-sm">{labels[service.code] ?? service.name}</strong><TextInput placeholder="Descripción" value={line.description} onChange={(event) => updateLineAt(activeUnit, lineIndex, { description: event.currentTarget.value })} /></div>
+                    <label className="text-xs font-black">Cantidad<TextInput required inputMode="decimal" placeholder="0" value={line.quantity} onChange={(event) => updateLineAt(activeUnit, lineIndex, { quantity: event.currentTarget.value })} /></label>
+                    <label className="text-xs font-black">Costo<TextInput required inputMode="decimal" placeholder="0" value={line.unitCost} onChange={(event) => liveLineValue(lineIndex, service.code, "unitCost", event.currentTarget.value)} /></label>
+                    <label className="text-xs font-black">Margen %<TextInput required inputMode="decimal" placeholder="0" value={line.marginPercent} onChange={(event) => liveLineValue(lineIndex, service.code, "marginPercent", event.currentTarget.value)} /></label>
+                    <div className="rounded-lg bg-emerald-50 p-3"><span className="text-xs">Precio automático · {displayCurrency}</span><strong className="block text-lg">{displayMoney(lineUnitPrice(line))}</strong><span className="text-xs font-black text-emerald-800">Total: {displayMoney(lineTotal(line))}</span></div>
+                  </div>
+                );
+              })}
+              {!lines.length ? <EmptyState text="Marca los servicios que corresponden a esta bodega." /> : null}
+            </div>
+          </div>
+        ) : null}
       </section>
       <section className="rounded-xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-950">
         <strong>Conversión USD/HNL:</strong>{" "}
