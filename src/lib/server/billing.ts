@@ -30,6 +30,9 @@ type DocumentInput = {
   exchangeRate?: number;
   equivalentCurrency?: "USD" | "HNL";
   equivalentTotal?: number;
+  exemptPurchaseOrder?: string;
+  exoneratedRegistryNumber?: string;
+  sagRegistryNumber?: string;
   payment?: { amount?: number; method?: "cash" | "transfer" | "card"; reference?: string };
 };
 
@@ -63,6 +66,7 @@ type StoredDocument = {
   tax: string;
   total: string;
   amount_paid: string;
+  credited_amount: string;
   status: string;
   cancellation_reason: string | null;
   currency: string;
@@ -78,7 +82,11 @@ type StoredDocument = {
   unit_number: string | null;
   map_zone: string | null;
   payment_method: string | null;
+  payment_reference: string | null;
   due_date: string | null;
+  exempt_purchase_order: string | null;
+  exonerated_registry_number: string | null;
+  sag_registry_number: string | null;
   items: StoredLine[];
 };
 
@@ -209,6 +217,8 @@ export async function resetTestBilling(confirmText: string) {
        WHERE status<>'INACTIVE' OR last_invoice_id IS NOT NULL`,
     );
     if (documentIds.length) {
+      await client.query(`DELETE FROM credit_note_events`);
+      await client.query(`DELETE FROM credit_notes`);
       await client.query(
         `DELETE FROM billing_document_cancellations WHERE document_id=ANY($1::text[])`,
         [documentIds],
@@ -296,11 +306,16 @@ export async function createBillingDocument(input: DocumentInput) {
     if (related.rowCount !== new Set(ids).size) throw new Error("Una o más bodegas no pertenecen al cliente seleccionado.");
   }
 
+  const hasFiscalExemption = Boolean(
+    input.exemptPurchaseOrder?.trim() ||
+    input.exoneratedRegistryNumber?.trim() ||
+    input.sagRegistryNumber?.trim(),
+  );
   const items = input.items.map((line) => {
     const quantity = numeric(line.quantity);
     const unitPrice = numeric(line.unitPrice);
     const discountPercent = numeric(line.discountPercent);
-    const taxRate = numeric(line.taxRate);
+    const taxRate = hasFiscalExemption ? 0 : numeric(line.taxRate);
     if (!line.description?.trim() || quantity <= 0 || unitPrice < 0 || discountPercent < 0 || discountPercent > 100 || taxRate < 0) {
       throw new Error("Revisa descripción, cantidad, precio, descuento e impuesto.");
     }
@@ -357,8 +372,9 @@ export async function createBillingDocument(input: DocumentInput) {
        (id,document_number,document_type,source,customer_id,unit_id,unit_label,customer_name,
         customer_email,customer_phone,customer_rtn,customer_address,currency,
         subtotal,discount,tax,total,status,notes,cai,fiscal_correlative,fiscal_range,fiscal_limit_date,
-        exchange_rate,equivalent_currency,equivalent_total)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+        exchange_rate,equivalent_currency,equivalent_total,
+        exempt_purchase_order,exonerated_registry_number,sag_registry_number)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`,
       [
         id, documentNumber, input.documentType, input.source ?? "MANUAL",
         input.customerId ?? null, unitAssignments[0]?.unitId ?? null, unitAssignments.map((entry) => entry.unitLabel).join(", ") || null, customer.name.trim(),
@@ -369,6 +385,9 @@ export async function createBillingDocument(input: DocumentInput) {
         numeric(input.exchangeRate) || null,
         input.equivalentCurrency ?? null,
         numeric(input.equivalentTotal) || null,
+        input.exemptPurchaseOrder?.trim() || null,
+        input.exoneratedRegistryNumber?.trim() || null,
+        input.sagRegistryNumber?.trim() || null,
       ],
     );
     for (const assignment of unitAssignments) {
@@ -502,7 +521,13 @@ export async function updateBillingDocument(id: string, action: string, input: R
     return result.rows[0];
   }
   if (action === "PAY") {
-    return applyBillingPayment(id, numeric(input.amount), String(input.method) as "cash" | "transfer" | "card", String(input.reference ?? ""));
+    return applyBillingPayment(
+      id,
+      numeric(input.amount),
+      String(input.method) as "cash" | "transfer" | "card",
+      String(input.reference ?? ""),
+      String(input.notes ?? ""),
+    );
   }
   if (action === "SEND") {
     await sendBillingEmail(id);
@@ -539,27 +564,29 @@ export async function updateBillingDocument(id: string, action: string, input: R
   throw new Error("Acción no permitida.");
 }
 
-async function applyBillingPayment(id: string, amount: number, method: "cash" | "transfer" | "card", reference?: string) {
+async function applyBillingPayment(id: string, amount: number, method: "cash" | "transfer" | "card", reference?: string, notes?: string) {
   if (amount <= 0 || !["cash", "transfer", "card"].includes(method)) throw new Error("Pago o método inválido.");
+  if (method !== "cash" && !reference?.trim()) throw new Error("La referencia bancaria es obligatoria para conciliar el pago.");
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    const result = await client.query<{ total: string; amount_paid: string; document_type: string; currency: string; status: string }>(
-      `SELECT total,amount_paid,document_type,currency,status FROM billing_documents WHERE id=$1 FOR UPDATE`, [id],
+    const result = await client.query<{ total: string; amount_paid: string; credited_amount: string; document_type: string; currency: string; status: string }>(
+      `SELECT total,amount_paid,credited_amount,document_type,currency,status FROM billing_documents WHERE id=$1 FOR UPDATE`, [id],
     );
     if (!result.rowCount || result.rows[0].document_type !== "INVOICE") throw new Error("Factura no encontrada.");
     if (result.rows[0].status === "CANCELLED") throw new Error("No se pueden registrar pagos en una factura anulada.");
-    const balance = round(Number(result.rows[0].total) - Number(result.rows[0].amount_paid));
+    const effectiveTotal = round(Number(result.rows[0].total) - Number(result.rows[0].credited_amount));
+    const balance = Math.max(0, round(effectiveTotal - Number(result.rows[0].amount_paid)));
     if (amount > balance) {
       const symbol = result.rows[0].currency === "HNL" ? "L " : "$";
       throw new Error(`El pago supera el saldo de ${symbol}${balance.toFixed(2)}.`);
     }
     const paid = round(Number(result.rows[0].amount_paid) + amount);
-    const status = paid >= Number(result.rows[0].total) ? "PAID" : "PARTIALLY_PAID";
-    await client.query(`INSERT INTO billing_payments (id,document_id,amount,method,reference) VALUES ($1,$2,$3,$4,$5)`, [randomUUID(), id, amount, method, reference?.trim() || null]);
+    const status = paid >= effectiveTotal ? "PAID" : "PARTIALLY_PAID";
+    await client.query(`INSERT INTO billing_payments (id,document_id,amount,method,reference,notes) VALUES ($1,$2,$3,$4,$5,$6)`, [randomUUID(), id, amount, method, reference?.trim() || null, notes?.trim() || null]);
     await client.query(`UPDATE billing_documents SET amount_paid=$2,status=$3,paid_at=CASE WHEN $3='PAID' THEN now() ELSE paid_at END,updated_at=now() WHERE id=$1`, [id, paid, status]);
     await client.query("COMMIT");
-    return { status, amountPaid: paid, balance: round(Number(result.rows[0].total) - paid) };
+    return { status, amountPaid: paid, balance: Math.max(0, round(effectiveTotal - paid)) };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -575,6 +602,7 @@ export async function getDocument(id: string) {
       (SELECT string_agg(bdu.unit_label,', ' ORDER BY bdu.unit_label) FROM billing_document_units bdu WHERE bdu.document_id=d.id),
       u.unit_number,d.unit_label) AS unit_number,u.map_zone,
       (SELECT bp.method FROM billing_payments bp WHERE bp.document_id=d.id ORDER BY bp.paid_at DESC LIMIT 1) AS payment_method,
+      (SELECT bp.reference FROM billing_payments bp WHERE bp.document_id=d.id ORDER BY bp.paid_at DESC LIMIT 1) AS payment_reference,
       (SELECT max(so.next_due_date)::text FROM storage_occupancies so WHERE so.last_invoice_id=d.id) AS due_date,
       COALESCE(json_agg(json_build_object(
         'catalogCode',di.catalog_code,'description',di.description,'quantity',di.quantity,
@@ -695,9 +723,9 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   if (document.document_type === "INVOICE") {
     pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(words.fiscal, 310, 171, { width: 245, align: "right" });
     pdf.font("Helvetica").fillColor("#334155").fontSize(6.2);
-    pdf.text(`${language === "en" ? "Exempt purchase order No." : "No. Orden de compra exenta"}: -`, 310, 187, { width: 245, align: "right" });
-    pdf.text(`${language === "en" ? "Exonerated registry certificate No." : "No. Constancia del registro exonerado"}: -`, 310, 198, { width: 245, align: "right" });
-    pdf.text(`${language === "en" ? "SAG registry identification No." : "No. Identificativo del registro de la SAG"}: -`, 310, 209, { width: 245, align: "right" });
+    pdf.text(`${language === "en" ? "Exempt purchase order No." : "No. Orden de compra exenta"}: ${document.exempt_purchase_order || "-"}`, 310, 187, { width: 245, align: "right", ellipsis: true });
+    pdf.text(`${language === "en" ? "Exonerated registry certificate No." : "No. Constancia del registro exonerado"}: ${document.exonerated_registry_number || "-"}`, 310, 198, { width: 245, align: "right", ellipsis: true });
+    pdf.text(`${language === "en" ? "SAG registry identification No." : "No. Identificativo del registro de la SAG"}: ${document.sag_registry_number || "-"}`, 310, 209, { width: 245, align: "right", ellipsis: true });
     if (document.cai) {
     const [rangeStart, rangeEnd] = String(document.fiscal_range ?? "-").split(" / ");
     pdf.fontSize(7).text(`${words.cai}:`, 310, 222, { width: 245, align: "right" });
@@ -798,13 +826,17 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   const taxAt = (rate: number) => converted(document.items
     .filter((item) => Number(item.taxRate) === rate)
     .reduce((sum, item) => sum + Number(item.tax), 0));
+  const exemptAmount = document.exempt_purchase_order ? converted(document.subtotal) : 0;
+  const exoneratedAmount = !document.exempt_purchase_order && (document.exonerated_registry_number || document.sag_registry_number)
+    ? converted(document.subtotal)
+    : 0;
   const fiscalRows: Array<[string, number]> = language === "en" ? [
-    ["Exempt amount", 0], ["Exonerated amount", 0], ["Discounts and rebates", converted(document.discount)],
+    ["Exempt amount", exemptAmount], ["Exonerated amount", exoneratedAmount], ["Discounts and rebates", converted(document.discount)],
     ["Taxable subtotal 15%", taxableBase(15)], ["Taxable subtotal 18%", taxableBase(18)],
     ["Subtotal", converted(document.subtotal)], ["VAT 15%", taxAt(15)],
     ["VAT 18%", taxAt(18)],
   ] : [
-    ["Importe exento", 0], ["Importe exonerado", 0], ["Descuentos y rebajas", converted(document.discount)],
+    ["Importe exento", exemptAmount], ["Importe exonerado", exoneratedAmount], ["Descuentos y rebajas", converted(document.discount)],
     ["Subtotal gravado al 15%", taxableBase(15)], ["Subtotal gravado al 18%", taxableBase(18)],
     ["Subtotal", converted(document.subtotal)], ["ISV 15%", taxAt(15)],
     ["ISV 18%", taxAt(18)],
@@ -842,11 +874,12 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
     }
   }
 
-  const balance = Math.max(0, Number(document.total) - Number(document.amount_paid));
+  const balance = Math.max(0, Number(document.total) - Number(document.credited_amount) - Number(document.amount_paid));
   const methodNames: Record<string, string> = language === "en"
     ? { cash: "Cash", transfer: "Bank transfer", card: "Card" }
-    : { cash: "Efectivo", transfer: "Transferencia bancaria", card: "Tarjeta" };
-  const paymentMethod = document.payment_method ? methodNames[document.payment_method] ?? document.payment_method : (language === "en" ? "Pending" : "Pendiente");
+    : { cash: "Efectivo", transfer: "Transferencia bancaria", card: "POS bancario (tarjeta)" };
+  const paymentMethodName = document.payment_method ? methodNames[document.payment_method] ?? document.payment_method : (language === "en" ? "Pending" : "Pendiente");
+  const paymentMethod = document.payment_reference ? `${paymentMethodName} · Ref. ${document.payment_reference}` : paymentMethodName;
   const dueDate = document.due_date
     ? formatDocumentDate(document.due_date, language)
     : formatDocumentDate(new Date(new Date(document.created_at).getTime() + 30 * 86_400_000), language);
@@ -858,7 +891,8 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   y += 10;
   pdf.text(`${language === "en" ? "Due date" : "Fecha de vencimiento"}: ${dueDate}`, 45, y, { width: 245 });
   pdf.font("Helvetica-Bold").text(`${words.paid}: ${renderCurrency} ${fiscalAmount(converted(document.amount_paid))}`, 310, y, { width: 245, align: "right" });
-  y += 10;
+  if (Number(document.credited_amount) > 0) pdf.font("Helvetica-Bold").text(`${language === "en" ? "Credit notes" : "Notas de crédito"}: ${renderCurrency} ${fiscalAmount(converted(document.credited_amount))}`, 310, y + 11, { width: 245, align: "right" });
+  y += Number(document.credited_amount) > 0 ? 22 : 10;
   pdf.font("Helvetica-Bold").text(`${words.balance}: ${renderCurrency} ${fiscalAmount(converted(balance))}`, 310, y, { width: 245, align: "right" });
   if (y > 632) {
     pdf.addPage({ size: "LETTER", margin: 45 });
