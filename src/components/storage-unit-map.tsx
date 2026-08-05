@@ -22,8 +22,6 @@ export const storageCodes = [
   ...Array.from({ length: 5 }, (_, index) => `G${String(index + 1).padStart(2, "0")}`),
 ];
 
-const grayCodes = new Set(["E01", "E02", "E18", "E20", "C01", "C18", "C19", "C36"]);
-
 export function StorageUnitMap({ units, ownedUnitIds, selectedIds, onSelect, description = "Selecciona una o varias bodegas para incluirlas en el documento." }: {
   units: StorageMapUnit[];
   ownedUnitIds: Set<string>;
@@ -39,7 +37,7 @@ export function StorageUnitMap({ units, ownedUnitIds, selectedIds, onSelect, des
     const selected = selectedIds.includes(unit.id);
     return (
       <button key={code} type="button" title={`Bodega ${code} · ${unit.occupied ? `Ocupada por ${unit.occupantName}` : owned ? "Asignada al cliente" : "Libre"}`} onClick={() => onSelect(unit, owned)}
-        className={`flex min-h-0 min-w-0 items-center justify-center overflow-hidden border border-black/15 text-[clamp(5px,1.35vw,8px)] font-semibold transition hover:brightness-95 ${selected ? "z-10 bg-[#004B13] text-white ring-2 ring-emerald-300" : unit.occupied ? "bg-[#8f8f8f] text-slate-950" : grayCodes.has(code) ? "bg-[#aaaaaa] text-slate-950" : "bg-[#59c35b] text-slate-950"}`}>
+        className={`flex min-h-0 min-w-0 items-center justify-center overflow-hidden border border-black/15 text-[clamp(5px,1.35vw,8px)] font-semibold transition hover:brightness-95 ${selected ? "z-10 bg-[#004B13] text-white ring-2 ring-emerald-300" : unit.occupied ? "bg-[#8f8f8f] text-slate-950" : "bg-[#59c35b] text-slate-950"}`}>
         <span className="-rotate-90 whitespace-nowrap leading-none">{code}</span>
       </button>
     );
