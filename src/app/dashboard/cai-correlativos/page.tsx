@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge, statusTone } from "@/components/status-badge";
-import { ActionButton, EmptyState, MetricCard, TextInput } from "@/components/ui";
+import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
+import { useLanguage } from "@/components/language-toggle";
 import { CaiRange, CaiStatus, shortDate } from "@/lib/dashboard-data";
 
 type ExtendedCaiStatus = CaiStatus | "BLOQUEADO";
@@ -29,6 +30,8 @@ type ExtendedCaiRange = Omit<CaiRange, "status"> & {
   office: string;
   notes: string;
 };
+
+type ConfirmationAction = ExtendedCaiStatus | "EDITAR";
 
 type HistoryRow = {
   id: string;
@@ -97,10 +100,13 @@ function rangeAlerts(range: ExtendedCaiRange) {
 }
 
 export default function CaiCorrelativosPage() {
+  const { language } = useLanguage();
   const [ranges, setRanges] = useState<ExtendedCaiRange[]>([]);
   const [fiscalDocuments, setFiscalDocuments] = useState<FiscalDocument[]>([]);
   const [message, setMessage] = useState("");
   const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<{ range: ExtendedCaiRange; action: ConfirmationAction } | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [form, setForm] = useState<CaiForm>({
     cai: "",
     initial: "",
@@ -109,7 +115,7 @@ export default function CaiCorrelativosPage() {
     authorizedAt: "",
     limitDate: "",
     documentType: "01",
-    branch: "001",
+    branch: "000",
     point: "001",
     office: "Principal",
     status: "ACTIVO",
@@ -143,7 +149,10 @@ export default function CaiCorrelativosPage() {
   }, []);
 
   useEffect(() => {
-    void loadFiscalData().catch((error) => setMessage(error instanceof Error ? error.message : "No se pudo cargar."));
+    const timer = window.setTimeout(() => {
+      void loadFiscalData().catch((error) => setMessage(error instanceof Error ? error.message : "No se pudo cargar."));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [loadFiscalData]);
 
   const active = useMemo(() => ranges.find((range) => range.status === "ACTIVO"), [ranges]);
@@ -187,7 +196,7 @@ export default function CaiCorrelativosPage() {
     }
     await loadFiscalData();
     setMessage(`CAI ${form.cai} registrado y activado correctamente. Caja ya puede consumir sus correlativos.`);
-    setForm({ cai: "", initial: "", final: "", current: "", authorizedAt: "", limitDate: "", documentType: "01", branch: "001", point: "001", office: "Principal", status: "ACTIVO", notes: "" });
+    setForm({ cai: "", initial: "", final: "", current: "", authorizedAt: "", limitDate: "", documentType: "01", branch: "000", point: "001", office: "Principal", status: "ACTIVO", notes: "" });
   };
 
   const updateStatus = async (id: string, nextStatus: ExtendedCaiStatus) => {
@@ -203,6 +212,52 @@ export default function CaiCorrelativosPage() {
     }
     await loadFiscalData();
     setMessage(`Rango actualizado a ${nextStatus}. Las nuevas facturas usarán esta configuración.`);
+  };
+
+  const confirmStatusChange = (range: ExtendedCaiRange, nextStatus: ExtendedCaiStatus) => {
+    setPendingConfirmation({ range, action: nextStatus });
+  };
+
+  const confirmRangeEdit = (range: ExtendedCaiRange) => {
+    setPendingConfirmation({ range, action: "EDITAR" });
+  };
+
+  const confirmationCopy = pendingConfirmation ? (() => {
+    const { range, action } = pendingConfirmation;
+    const spanish = {
+      ACTIVO: ["Activar CAI", "Este rango quedará disponible inmediatamente para emitir nuevas facturas.", "Sí, activar"],
+      INACTIVO: ["Dar de baja el CAI", "Caja dejará de utilizar este rango para emitir facturas nuevas.", "Sí, dar de baja"],
+      AGOTADO: ["Marcar rango como agotado", "Este CAI ya no podrá utilizarse para emitir nuevas facturas.", "Sí, marcar agotado"],
+      VENCIDO: ["Marcar CAI como vencido", "Este rango quedará fuera de uso para nuevas emisiones fiscales.", "Sí, marcar vencido"],
+      BLOQUEADO: ["Bloquear CAI", "La facturación con este rango quedará detenida hasta que vuelva a activarse.", "Sí, bloquear"],
+      EDITAR: ["Editar rango autorizado", "La edición solo se habilitará si este CAI no tiene facturas asociadas.", "Continuar a edición"],
+    } as const;
+    const english = {
+      ACTIVO: ["Activate CAI", "This range will immediately become available for issuing new invoices.", "Yes, activate"],
+      INACTIVO: ["Deactivate CAI", "Cashier will stop using this range to issue new invoices.", "Yes, deactivate"],
+      AGOTADO: ["Mark Range as Depleted", "This CAI can no longer be used to issue new invoices.", "Yes, mark depleted"],
+      VENCIDO: ["Mark CAI as Expired", "This range will be disabled for new fiscal documents.", "Yes, mark expired"],
+      BLOQUEADO: ["Block CAI", "Billing with this range will stop until it is activated again.", "Yes, block"],
+      EDITAR: ["Edit Authorized Range", "Editing will only be enabled if this CAI has no associated invoices.", "Continue to Edit"],
+    } as const;
+    const [title, description, confirmLabel] = (language === "en" ? english : spanish)[action];
+    return { range, action, title, description, confirmLabel };
+  })() : null;
+
+  const executeConfirmedAction = async () => {
+    if (!pendingConfirmation) return;
+    const { range, action } = pendingConfirmation;
+    setConfirming(true);
+    try {
+      if (action === "EDITAR") {
+        setMessage(`Edición habilitada solo si no hay facturas asociadas al CAI ${range.cai}.`);
+      } else {
+        await updateStatus(range.id, action);
+      }
+      setPendingConfirmation(null);
+    } finally {
+      setConfirming(false);
+    }
   };
 
   const histories = useMemo<Record<string, HistoryRow[]>>(() => {
@@ -260,9 +315,12 @@ export default function CaiCorrelativosPage() {
 
         <form className="rounded-lg border border-slate-200 bg-white p-4" onSubmit={(event) => { event.preventDefault(); void addRange(); }}>
           <h2 className="mb-4 font-black text-slate-950">Registrar nuevo CAI</h2>
-          <p className="mb-4 text-sm text-slate-600">Escribe los rangos completos autorizados. El sistema detectará automáticamente establecimiento, punto de emisión y tipo de documento, y dejará este CAI activo para Caja.</p>
+          <p className="mb-4 text-sm text-slate-600">Registra por separado la serie de Factura (01) y la serie de Nota de crédito (03). Cada documento consume únicamente su rango autorizado.</p>
           <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
             <label className="text-xs font-black text-slate-700">CAI<TextInput required placeholder="Escribe el CAI autorizado" value={form.cai} onChange={(event) => setForm({ ...form, cai: event.target.value.toUpperCase() })} /></label>
+            <label className="text-xs font-black text-slate-700">Tipo de documento<SelectInput value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value })}><option value="01">01 · Factura</option><option value="03">03 · Nota de crédito</option></SelectInput></label>
+            <label className="text-xs font-black text-slate-700">Establecimiento<TextInput required inputMode="numeric" maxLength={3} value={form.branch} onChange={(event) => setForm({ ...form, branch: event.target.value.replace(/\D/g, "") })} /></label>
+            <label className="text-xs font-black text-slate-700">Punto de emisión<TextInput required inputMode="numeric" maxLength={3} value={form.point} onChange={(event) => setForm({ ...form, point: event.target.value.replace(/\D/g, "") })} /></label>
             <label className="text-xs font-black text-slate-700">Fecha de autorización<TextInput required type="date" value={form.authorizedAt} onChange={(event) => setForm({ ...form, authorizedAt: inputIsoDate(event.currentTarget) })} /></label>
             <label className="text-xs font-black text-slate-700">Fecha límite de emisión<TextInput required type="date" value={form.limitDate} onChange={(event) => setForm({ ...form, limitDate: inputIsoDate(event.currentTarget) })} /></label>
             <label className="text-xs font-black text-slate-700">Rango inicial<TextInput required inputMode="numeric" placeholder="Ejemplo: 1" value={form.initial} onChange={(event) => setForm({ ...form, initial: event.target.value, current: form.current || event.target.value })} /></label>
@@ -288,6 +346,7 @@ export default function CaiCorrelativosPage() {
                 <thead>
                   <tr>
                     <th>CAI</th>
+                    <th>Documento</th>
                     <th>Rango inicial</th>
                     <th>Rango final</th>
                     <th>Correlativo actual</th>
@@ -303,6 +362,7 @@ export default function CaiCorrelativosPage() {
                   {ranges.map((range) => (
                     <tr key={range.id}>
                       <td className="min-w-72 font-mono text-xs">{range.cai}</td>
+                      <td className="font-bold">{range.documentType === "03" ? "Nota de crédito" : "Factura"} ({range.documentType})</td>
                       <td className="font-mono text-xs">{fiscalNumber(range, range.initial)}</td>
                       <td className="font-mono text-xs">{fiscalNumber(range, range.final)}</td>
                       <td className="font-mono text-xs font-black">{fiscalNumber(range, range.current)}</td>
@@ -315,17 +375,13 @@ export default function CaiCorrelativosPage() {
                       </td>
                       <td>
                         <div className="flex min-w-[560px] flex-wrap gap-2">
-                          <ActionButton variant="secondary" onClick={() => updateStatus(range.id, "ACTIVO")}>Activar</ActionButton>
-                          <ActionButton variant="danger" onClick={() => {
-                            if (window.confirm(`¿Dar de baja el CAI ${range.cai}? Caja dejará de utilizar este rango.`)) {
-                              void updateStatus(range.id, "INACTIVO");
-                            }
-                          }}>Dar de baja</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => setMessage(`Edición habilitada solo si no hay facturas asociadas al CAI ${range.cai}.`)}>Editar rango</ActionButton>
+                          <ActionButton variant="secondary" onClick={() => confirmStatusChange(range, "ACTIVO")}>Activar</ActionButton>
+                          <ActionButton variant="danger" onClick={() => confirmStatusChange(range, "INACTIVO")}>Dar de baja</ActionButton>
+                          <ActionButton variant="secondary" onClick={() => confirmRangeEdit(range)}>Editar rango</ActionButton>
                           <ActionButton variant="secondary" onClick={() => setHistoryFor(range.id)}>Ver historial</ActionButton>
                           <ActionButton variant="secondary" onClick={() => setMessage(`${fiscalDocuments.filter((invoice) => invoice.cai === range.cai).length} facturas asociadas a este CAI.`)}>Ver facturas</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => updateStatus(range.id, "AGOTADO")}>Agotado</ActionButton>
-                          <ActionButton onClick={() => updateStatus(range.id, "BLOQUEADO")}>Bloquear</ActionButton>
+                          <ActionButton variant="secondary" onClick={() => confirmStatusChange(range, "AGOTADO")}>Agotado</ActionButton>
+                          <ActionButton onClick={() => confirmStatusChange(range, "BLOQUEADO")}>Bloquear</ActionButton>
                         </div>
                       </td>
                     </tr>
@@ -376,6 +432,40 @@ export default function CaiCorrelativosPage() {
           </section>
         ) : null}
       </div>
+
+      {confirmationCopy ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="cai-confirmation-title">
+          <section className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/20 bg-white">
+            <div className="p-6">
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xl font-black text-slate-700">
+                  {confirmationCopy.action === "ACTIVO" ? "✓" : confirmationCopy.action === "EDITAR" ? "✎" : "!"}
+                </div>
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-400">{language === "en" ? "Confirmation required" : "Confirmación requerida"}</p>
+                  <h2 id="cai-confirmation-title" className="mt-1 text-xl font-black text-slate-950">{confirmationCopy.title}</h2>
+                  <p className="mt-2 text-sm leading-6 text-slate-600">{confirmationCopy.description}</p>
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">CAI</p>
+                <p className="mt-1 break-all font-mono text-sm font-black text-slate-900">{confirmationCopy.range.cai}</p>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-600">
+                  <p><strong className="block text-slate-900">{language === "en" ? "Current status" : "Estado actual"}</strong>{confirmationCopy.range.status}</p>
+                  <p><strong className="block text-slate-900">{language === "en" ? "Authorized range" : "Rango autorizado"}</strong>{fiscalNumber(confirmationCopy.range, confirmationCopy.range.initial)} – {fiscalNumber(confirmationCopy.range, confirmationCopy.range.final)}</p>
+                </div>
+              </div>
+
+              <p className="mt-4 text-xs font-semibold text-slate-500">{language === "en" ? "Review the information before continuing. You can cancel without making any changes." : "Revisa la información antes de continuar. Puedes cancelar sin realizar ningún cambio."}</p>
+            </div>
+            <div className="flex flex-col-reverse gap-2 border-t border-slate-200 bg-slate-50 px-6 py-4 sm:flex-row sm:justify-end">
+              <button type="button" disabled={confirming} onClick={() => setPendingConfirmation(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-black text-slate-700 transition hover:bg-slate-100 disabled:opacity-50">{language === "en" ? "Cancel" : "Cancelar"}</button>
+              <button type="button" disabled={confirming} onClick={() => void executeConfirmedAction()} className="rounded-lg border border-slate-900 bg-slate-900 px-4 py-2.5 text-sm font-black text-white transition hover:bg-slate-800 disabled:opacity-50">{confirming ? (language === "en" ? "Processing..." : "Procesando...") : confirmationCopy.confirmLabel}</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </>
   );
 }
