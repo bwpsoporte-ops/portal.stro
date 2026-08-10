@@ -640,16 +640,15 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
     logo_url: null, primary_color: "#004B13", header_design: "moderno",
   };
   const primaryColor = /^#[0-9a-f]{6}$/i.test(company.primary_color) ? company.primary_color : "#004B13";
-  const renderCurrency = options?.currency ?? (document.currency === "HNL" ? "HNL" : "USD");
+  // El PDF se presenta principalmente en HNL; la moneda original permanece
+  // guardada y USD se muestra únicamente como equivalencia informativa.
+  const renderCurrency = "HNL" as const;
   const language = options?.language ?? "es";
   const exchangeRate = Number(document.exchange_rate) || 0;
-  const conversion = renderCurrency === document.currency
-    ? 1
-    : document.currency === "USD" && renderCurrency === "HNL"
-      ? exchangeRate
-      : document.currency === "HNL" && renderCurrency === "USD" && exchangeRate
-        ? 1 / exchangeRate
-        : 1;
+  const hnlRate = exchangeRate || (document.currency === "USD" && Number(document.equivalent_total)
+    ? Number(document.equivalent_total) / Number(document.total)
+    : 0);
+  const conversion = document.currency === "HNL" ? 1 : hnlRate;
   const converted = (value: string | number) => round(Number(value) * conversion);
   const words = language === "en" ? {
     invoice: "INVOICE", proforma: "PROFORMA", number: "No.", date: "Issue date",
@@ -853,23 +852,21 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   pdf.text(`${renderCurrency} ${fiscalAmount(converted(document.total))}`, 435, y + 3, { width: 110, align: "right" });
   y += 24;
 
-  const usdToHnl = exchangeRate || (document.currency === "USD" && Number(document.equivalent_total)
-    ? Number(document.equivalent_total) / Number(document.total)
-    : 0);
+  const usdToHnl = hnlRate;
   const totalUsd = document.currency === "USD" ? Number(document.total) : usdToHnl ? Number(document.total) / usdToHnl : 0;
   const totalHnl = document.currency === "HNL" ? Number(document.total) : usdToHnl ? Number(document.total) * usdToHnl : Number(document.equivalent_total) || 0;
   pdf.fillColor("#334155").font("Helvetica-Bold").fontSize(7).text(`${words.rate}:`, 315, y, { width: 100 });
   pdf.font("Helvetica").text(usdToHnl ? `USD 1.00 = L ${usdToHnl.toFixed(4)}` : (language === "en" ? "Not available" : "No disponible"), 415, y, { width: 140, align: "right" });
   y += 12;
-  pdf.font("Helvetica-Bold").text(language === "en" ? "TOTAL EQUIVALENT IN LEMPIRAS:" : "TOTAL EQUIVALENTE EN LEMPIRAS:", 315, y, { width: 155 });
-  pdf.text(`L ${fiscalAmount(totalHnl)}`, 470, y, { width: 85, align: "right" });
+  pdf.font("Helvetica-Bold").text(language === "en" ? "TOTAL EQUIVALENT IN USD:" : "TOTAL EQUIVALENTE EN USD:", 315, y, { width: 155 });
+  pdf.text(`USD ${fiscalAmount(totalUsd)}`, 470, y, { width: 85, align: "right" });
   y += 16;
 
   if (language === "es") {
-    pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(7).text(`SON: ${amountInSpanish(renderCurrency === "USD" ? totalUsd : totalHnl, renderCurrency)}.`, 45, y, { width: 510, lineGap: 1 });
+    pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(7).text(`SON: ${amountInSpanish(totalHnl, "HNL")}.`, 45, y, { width: 510, lineGap: 1 });
     y += 18;
-    if (renderCurrency === "USD" && totalHnl > 0) {
-      pdf.fillColor("#475569").fontSize(6.5).text(`EQUIVALENTE EN MONEDA NACIONAL: ${amountInSpanish(totalHnl, "HNL")}.`, 45, y, { width: 510, lineGap: 1 });
+    if (totalUsd > 0) {
+      pdf.fillColor("#475569").fontSize(6.5).text(`EQUIVALENTE INFORMATIVO: ${amountInSpanish(totalUsd, "USD")}.`, 45, y, { width: 510, lineGap: 1 });
       y += 18;
     }
   }
@@ -934,7 +931,7 @@ async function sendBillingEmail(id: string) {
   });
   const attachments = document.source === "SERVICE" && document.exchange_rate
     ? [
-        { filename: `${document.document_number}-USD-en.pdf`, content: await createBillingPdf(id, { currency: "USD", language: "en" }), contentType: "application/pdf" },
+        { filename: `${document.document_number}-USD-es.pdf`, content: await createBillingPdf(id, { currency: "USD", language: "es" }), contentType: "application/pdf" },
         { filename: `${document.document_number}-HNL-es.pdf`, content: await createBillingPdf(id, { currency: "HNL", language: "es" }), contentType: "application/pdf" },
       ]
     : [{ filename: `${document.document_number}.pdf`, content: await createBillingPdf(id), contentType: "application/pdf" }];
