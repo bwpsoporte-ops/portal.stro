@@ -205,6 +205,8 @@ async function createSchema() {
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS exonerated_registry_number text;
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS sag_registry_number text;
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS credited_amount numeric(14,2) NOT NULL DEFAULT 0;
+    ALTER TABLE integration_invoices
+      ADD COLUMN IF NOT EXISTS billing_document_id text REFERENCES billing_documents(id) ON DELETE SET NULL;
 
     CREATE TABLE IF NOT EXISTS credit_notes (
       id text PRIMARY KEY,
