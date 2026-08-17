@@ -153,7 +153,7 @@ export async function getBillingData(type?: string, includeCancelled = false) {
       `SELECT c.id,c.storeganise_user_id,c.first_name,c.last_name,c.email,c.phone,c.address,
         c.billing_data,count(DISTINCT i.id)::integer AS invoice_count
        FROM integration_customers c
-       JOIN integration_invoices i ON i.storeganise_user_id=c.storeganise_user_id AND i.deleted=false
+       LEFT JOIN integration_invoices i ON i.storeganise_user_id=c.storeganise_user_id AND i.deleted=false
        WHERE c.disabled=false GROUP BY c.id
        ORDER BY c.first_name NULLS LAST,c.last_name NULLS LAST`,
     ),
