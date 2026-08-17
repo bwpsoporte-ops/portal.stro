@@ -1,16 +1,22 @@
-const requiredInProduction = [
-  "DATABASE_URL",
-  "STOREGANISE_WEBHOOK_SECRET",
-  "PAY_PORTAL_WEBHOOK_SECRET",
-] as const;
-
-export function assertIntegrationConfig() {
+function assertRequired(names: readonly string[]) {
   if (process.env.NODE_ENV !== "production") return;
-
-  const missing = requiredInProduction.filter((name) => !process.env[name]);
+  const missing = names.filter((name) => !process.env[name]);
   if (missing.length) {
     throw new Error(`Faltan variables de entorno: ${missing.join(", ")}`);
   }
+}
+
+export function assertStoreganiseConfig() {
+  assertRequired([
+    "DATABASE_URL",
+    "STOREGANISE_WEBHOOK_SECRET",
+    "STOREGANISE_API_URL",
+    "STOREGANISE_API_KEY",
+  ]);
+}
+
+export function assertPaymentConfig() {
+  assertRequired(["DATABASE_URL", "PAY_PORTAL_WEBHOOK_SECRET"]);
 }
 
 export function env(name: string) {
