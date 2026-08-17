@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertIntegrationConfig } from "@/lib/server/integrations/config";
+import { assertPaymentConfig } from "@/lib/server/integrations/config";
 import { verifySignedBody, verifyTimestamp } from "@/lib/server/integrations/security";
 import { processPaymentNotice, validatePaymentNotice } from "@/lib/server/integrations/payment";
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
-    assertIntegrationConfig();
+    assertPaymentConfig();
     const rawBody = await request.text();
     const signature = request.headers.get("x-portal-signature");
     const timestamp = request.headers.get("x-portal-timestamp");
