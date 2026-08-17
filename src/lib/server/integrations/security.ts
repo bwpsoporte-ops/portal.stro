@@ -8,6 +8,10 @@ export function signBody(rawBody: string, secret: string) {
   return createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
 }
 
+export function signBodyBase64(rawBody: string, secret: string) {
+  return createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
+}
+
 export function signaturesMatch(received: string | null, expected: string) {
   if (!received) return false;
   const left = Buffer.from(cleanSignature(received), "utf8");
@@ -18,6 +22,11 @@ export function signaturesMatch(received: string | null, expected: string) {
 export function verifySignedBody(rawBody: string, received: string | null, secret?: string) {
   if (!secret) return process.env.NODE_ENV !== "production";
   return signaturesMatch(received, signBody(rawBody, secret));
+}
+
+export function verifyStoreganiseSignedBody(rawBody: string, received: string | null, secret?: string) {
+  if (!secret) return process.env.NODE_ENV !== "production";
+  return signaturesMatch(received, signBodyBase64(rawBody, secret));
 }
 
 export function verifyTimestamp(timestamp: string | null, maxAgeSeconds = 300) {
