@@ -1,17 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getPool } from "@/lib/server/db";
+import { createBillingDocument } from "@/lib/server/billing";
 import { ensureIntegrationSchema } from "./schema";
+import {
+  fetchStoreganiseInvoice,
+  fetchStoreganiseJob,
+  fetchStoreganiseUnit,
+  fetchStoreganiseUnitRental,
+  fetchStoreganiseUser,
+} from "./storeganise-api";
 
 export const STOREGANISE_EVENTS = new Set([
-  "invoice.payments.updated",
-  "invoice.state.updated",
-  "invoice.updated",
-  "invoice.deleted",
-  "user.disabled",
-  "user.created",
-  "user.updated",
-  "user.billing.updated",
-  "addon.dailyEvent.started",
+  "invoice.payments.updated", "invoice.state.updated", "invoice.updated", "invoice.deleted",
+  "user.disabled", "user.created", "user.updated", "user.billing.updated",
+  "job.unit_moveIn.created", "job.unit_moveIn.completed",
+  "job.unit_moveOut.created", "job.unit_moveOut.completed",
+  "unit.occupied", "unit.unassigned", "unitRental.updated", "unitRental.invoice.created",
 ]);
 
 type JsonObject = Record<string, unknown>;
@@ -28,9 +32,23 @@ function text(value: unknown) {
   return value === undefined || value === null ? null : String(value);
 }
 
+function idFrom(data: JsonObject, ...keys: string[]) {
+  return text(first(data, ...keys));
+}
+
 function amount(value: unknown) {
-  const number = Number(value ?? 0);
-  return Number.isFinite(number) ? number : 0;
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function addressText(value: unknown) {
+  if (typeof value === "string") return value;
+  const address = object(value);
+  return text(first(address, "formatted", "address", "address1", "line1", "street"));
+}
+
+function snapshot(payload: JsonObject, resource: JsonObject) {
+  return { webhook: payload, resource };
 }
 
 export function parseStoreganiseEvent(payload: JsonObject, rawBody: string) {
@@ -46,33 +64,62 @@ export async function processStoreganiseWebhook(payload: JsonObject, rawBody: st
   const db = getPool();
   const { data, eventType, eventId } = parseStoreganiseEvent(payload, rawBody);
   const eventRowId = randomUUID();
-  const inserted = await db.query(
+  const inserted = await db.query<{ id: string }>(
     `INSERT INTO integration_webhook_events
-      (id, provider, event_id, event_type, signature_valid, raw_payload)
-     VALUES ($1, 'STOREGANISE', $2, $3, true, $4::jsonb)
-     ON CONFLICT (provider, event_id) DO NOTHING
+      (id,provider,event_id,event_type,signature_valid,raw_payload)
+     VALUES ($1,'STOREGANISE',$2,$3,true,$4::jsonb)
+     ON CONFLICT (provider,event_id) DO UPDATE SET
+       status='RECEIVED',error_message=NULL,received_at=now(),processed_at=NULL
+     WHERE integration_webhook_events.status='FAILED'
      RETURNING id`,
     [eventRowId, eventId, eventType, JSON.stringify(payload)],
   );
-
   if (!inserted.rowCount) return { eventId, eventType, status: "DUPLICATE" };
+  const processingEventId = inserted.rows[0].id;
 
   try {
     if (!STOREGANISE_EVENTS.has(eventType)) {
-      await finishEvent(eventRowId, "IGNORED");
+      await finishEvent(processingEventId, "IGNORED");
       return { eventId, eventType, status: "IGNORED" };
     }
-
-    if (eventType.startsWith("user.")) await upsertCustomer(eventType, data, payload);
-    if (eventType.startsWith("invoice.")) await upsertInvoice(eventType, data, payload);
-    await finishEvent(eventRowId, "PROCESSED");
+    const apiUrl = payload.apiUrl;
+    if (eventType.startsWith("user.")) {
+      const userId = idFrom(data, "userId", "user_id", "id", "_id");
+      if (!userId) throw new Error("El webhook de usuario no contiene userId.");
+      const user = await fetchStoreganiseUser(userId, apiUrl);
+      await upsertCustomer(eventType, { ...data, ...user, userId }, payload);
+    } else if (eventType.startsWith("invoice.")) {
+      const invoiceId = idFrom(data, "invoiceId", "invoice_id", "id", "_id");
+      if (!invoiceId) throw new Error("El webhook de factura no contiene invoiceId.");
+      const invoice = eventType === "invoice.deleted"
+        ? { ...data, invoiceId }
+        : { ...data, ...await fetchStoreganiseInvoice(invoiceId, apiUrl), invoiceId };
+      await syncInvoiceCustomer(invoice, payload, apiUrl);
+      await upsertInvoice(eventType, invoice, payload);
+      if (eventType !== "invoice.deleted") await ensurePortalInvoice(invoiceId, invoice);
+    } else if (eventType.startsWith("unitRental.")) {
+      const rentalId = idFrom(data, "unitRentalId", "unit_rental_id", "rentalId", "id", "_id");
+      if (!rentalId) throw new Error("El webhook de alquiler no contiene unitRentalId.");
+      const rental = { ...data, ...await fetchStoreganiseUnitRental(rentalId, apiUrl), unitRentalId: rentalId };
+      await syncRental(eventType, rental, payload, apiUrl);
+    } else if (eventType.startsWith("unit.")) {
+      const unitId = idFrom(data, "unitId", "unit_id", "id", "_id");
+      if (!unitId) throw new Error("El webhook de bodega no contiene unitId.");
+      const unit = { ...data, ...await fetchStoreganiseUnit(unitId, apiUrl), unitId };
+      await syncUnit(eventType, unit, payload, apiUrl);
+    } else if (eventType.startsWith("job.")) {
+      const jobId = idFrom(data, "jobId", "job_id", "id", "_id");
+      if (!jobId) throw new Error("El webhook de trabajo no contiene jobId.");
+      const job = { ...data, ...await fetchStoreganiseJob(jobId, apiUrl), jobId };
+      await syncJob(eventType, job, payload, apiUrl);
+    }
+    await finishEvent(processingEventId, "PROCESSED");
     return { eventId, eventType, status: "PROCESSED" };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Error desconocido";
     await db.query(
-      `UPDATE integration_webhook_events
-       SET status = 'FAILED', error_message = $2, processed_at = now() WHERE id = $1`,
-      [eventRowId, message],
+      `UPDATE integration_webhook_events SET status='FAILED',error_message=$2,processed_at=now() WHERE id=$1`,
+      [processingEventId, message],
     );
     throw error;
   }
@@ -80,98 +127,271 @@ export async function processStoreganiseWebhook(payload: JsonObject, rawBody: st
 
 async function finishEvent(id: string, status: string) {
   await getPool().query(
-    `UPDATE integration_webhook_events SET status = $2, processed_at = now() WHERE id = $1`,
+    `UPDATE integration_webhook_events SET status=$2,processed_at=now() WHERE id=$1`,
     [id, status],
   );
 }
 
-async function upsertCustomer(eventType: string, data: JsonObject, payload: JsonObject) {
-  const billing = object(data.billing ?? data.billingDetails ?? data.billing_data);
-  const userId = text(first(data, "userId", "user_id", "id", "_id"));
-  if (!userId) throw new Error("El evento de usuario no contiene un identificador.");
+async function syncInvoiceCustomer(invoice: JsonObject, payload: JsonObject, apiUrl?: unknown) {
+  const embedded = object(invoice.user ?? invoice.customer ?? invoice.owner);
+  const userId = idFrom(invoice, "userId", "user_id", "customerId", "ownerId")
+    ?? idFrom(embedded, "id", "_id", "userId");
+  if (!userId) return;
+  const user = Object.keys(embedded).length
+    ? { ...embedded, userId }
+    : { ...await fetchStoreganiseUser(userId, apiUrl), userId };
+  await upsertCustomer("user.updated", user, payload);
+}
 
+async function upsertCustomer(eventType: string, data: JsonObject, payload: JsonObject) {
+  const contact = object(data.contact ?? data.contactDetails ?? data.contact_data);
+  const billing = object(data.billing ?? data.billingDetails ?? data.billing_data);
+  const billingAddress = object(billing.address ?? billing.billingAddress);
+  const userId = idFrom(data, "userId", "user_id", "id", "_id");
+  if (!userId) throw new Error("El recurso de usuario no contiene un identificador.");
   await getPool().query(
     `INSERT INTO integration_customers
-      (id, storeganise_user_id, email, first_name, last_name, phone, address, city,
-       billing_data, disabled, raw_payload)
+      (id,storeganise_user_id,email,first_name,last_name,phone,address,city,billing_data,disabled,raw_payload)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb)
      ON CONFLICT (storeganise_user_id) DO UPDATE SET
-       email = COALESCE(EXCLUDED.email, integration_customers.email),
-       first_name = COALESCE(EXCLUDED.first_name, integration_customers.first_name),
-       last_name = COALESCE(EXCLUDED.last_name, integration_customers.last_name),
-       phone = COALESCE(EXCLUDED.phone, integration_customers.phone),
-       address = COALESCE(EXCLUDED.address, integration_customers.address),
-       city = COALESCE(EXCLUDED.city, integration_customers.city),
-       billing_data = CASE WHEN EXCLUDED.billing_data = '{}'::jsonb
-         THEN integration_customers.billing_data ELSE EXCLUDED.billing_data END,
-       disabled = EXCLUDED.disabled,
-       raw_payload = EXCLUDED.raw_payload,
-       updated_at = now()`,
+       email=COALESCE(EXCLUDED.email,integration_customers.email),
+       first_name=COALESCE(EXCLUDED.first_name,integration_customers.first_name),
+       last_name=COALESCE(EXCLUDED.last_name,integration_customers.last_name),
+       phone=COALESCE(EXCLUDED.phone,integration_customers.phone),
+       address=COALESCE(EXCLUDED.address,integration_customers.address),
+       city=COALESCE(EXCLUDED.city,integration_customers.city),
+       billing_data=CASE WHEN EXCLUDED.billing_data='{}'::jsonb THEN integration_customers.billing_data ELSE EXCLUDED.billing_data END,
+       disabled=EXCLUDED.disabled,raw_payload=EXCLUDED.raw_payload,updated_at=now()`,
     [
-      randomUUID(), userId, text(first(data, "email")),
-      text(first(data, "firstName", "first_name")), text(first(data, "lastName", "last_name")),
-      text(first(data, "phone", "phoneNumber")), text(first(data, "address", "address1")),
-      text(first(data, "city")), JSON.stringify(billing),
-      eventType === "user.disabled" || data.disabled === true, JSON.stringify(payload),
+      randomUUID(), userId,
+      text(first(data, "email")) ?? text(first(contact, "email")),
+      text(first(data, "firstName", "first_name", "givenName")),
+      text(first(data, "lastName", "last_name", "familyName")),
+      text(first(data, "phone", "phoneNumber", "mobile")) ?? text(first(contact, "phone", "phoneNumber", "mobile")),
+      addressText(first(data, "address", "address1", "contactAddress")) ?? addressText(billing.address),
+      text(first(data, "city")) ?? text(first(billingAddress, "city")),
+      JSON.stringify(billing), eventType === "user.disabled" || data.disabled === true || data.active === false,
+      JSON.stringify(snapshot(payload, data)),
     ],
   );
 }
 
 async function upsertInvoice(eventType: string, data: JsonObject, payload: JsonObject) {
-  const invoiceId = text(first(data, "invoiceId", "invoice_id", "id", "_id"));
-  if (!invoiceId) throw new Error("El evento de factura no contiene un identificador.");
-  const user = object(data.user ?? data.customer);
-  const userId = text(first(data, "userId", "user_id", "customerId")) ?? text(first(user, "id", "_id"));
-  const statusValue = first(data, "state", "status");
-  const status = text(statusValue) ?? "UNKNOWN";
-  const total = first(data, "amount", "total", "amountDue", "balance");
+  const invoiceId = idFrom(data, "invoiceId", "invoice_id", "id", "_id");
+  if (!invoiceId) throw new Error("El recurso de factura no contiene un identificador.");
+  const user = object(data.user ?? data.customer ?? data.owner);
+  const userId = idFrom(data, "userId", "user_id", "customerId", "ownerId") ?? idFrom(user, "id", "_id");
+  const statusValue = first(data, "state", "status", "paymentState");
+  const total = first(data, "amount", "total", "amountDue", "balance", "grandTotal");
   const currencyValue = first(data, "currency", "currencyCode");
-  const currency = text(currencyValue) ?? "HNL";
-
+  const currency = text(first(object(currencyValue), "code")) ?? text(currencyValue) ?? "USD";
   await getPool().query(
     `INSERT INTO integration_invoices
-      (id, storeganise_invoice_id, storeganise_user_id, amount, currency,
-       storeganise_status, raw_payload, deleted)
+      (id,storeganise_invoice_id,storeganise_user_id,amount,currency,storeganise_status,raw_payload,deleted)
      VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
      ON CONFLICT (storeganise_invoice_id) DO UPDATE SET
-       storeganise_user_id = COALESCE(EXCLUDED.storeganise_user_id, integration_invoices.storeganise_user_id),
-       amount = CASE WHEN $9 THEN EXCLUDED.amount ELSE integration_invoices.amount END,
-       currency = CASE WHEN $10 THEN EXCLUDED.currency ELSE integration_invoices.currency END,
-       storeganise_status = CASE WHEN $11 THEN EXCLUDED.storeganise_status ELSE integration_invoices.storeganise_status END,
-       raw_payload = EXCLUDED.raw_payload,
-       deleted = EXCLUDED.deleted,
-       updated_at = now()`,
+       storeganise_user_id=COALESCE(EXCLUDED.storeganise_user_id,integration_invoices.storeganise_user_id),
+       amount=CASE WHEN $9 THEN EXCLUDED.amount ELSE integration_invoices.amount END,
+       currency=CASE WHEN $10 THEN EXCLUDED.currency ELSE integration_invoices.currency END,
+       storeganise_status=CASE WHEN $11 THEN EXCLUDED.storeganise_status ELSE integration_invoices.storeganise_status END,
+       raw_payload=EXCLUDED.raw_payload,deleted=EXCLUDED.deleted,updated_at=now()`,
     [
-      randomUUID(), invoiceId, userId, amount(total), currency, status,
-      JSON.stringify(payload), eventType === "invoice.deleted",
-      total !== undefined && total !== null,
-      currencyValue !== undefined && currencyValue !== null,
+      randomUUID(), invoiceId, userId, amount(total), currency, text(statusValue) ?? "UNKNOWN",
+      JSON.stringify(snapshot(payload, data)), eventType === "invoice.deleted",
+      total !== undefined && total !== null, currencyValue !== undefined && currencyValue !== null,
       statusValue !== undefined && statusValue !== null,
     ],
   );
+  await syncUnitFromResource(eventType, data, payload, userId);
+}
 
-  const rental = object(data.unitRental ?? data.rental);
-  const unit = object(data.unit ?? rental.unit);
-  const unitId = text(first(data, "unitId", "unit_id"))
-    ?? text(first(rental, "unitId", "unit_id"))
-    ?? text(first(unit, "id", "_id"));
-  const unitNumber = text(first(data, "unitNumber", "unitName"))
-    ?? text(first(rental, "unitNumber", "unitName", "name"))
-    ?? text(first(unit, "number", "name", "label"));
-  if (userId && (unitId || unitNumber)) {
-    const externalUnitId = unitId ?? `${userId}:${unitNumber}`;
-    await getPool().query(
-      `INSERT INTO customer_units
-       (id,storeganise_unit_id,storeganise_user_id,unit_number,map_zone,raw_payload)
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb)
-       ON CONFLICT (storeganise_unit_id) DO UPDATE SET
-         storeganise_user_id=EXCLUDED.storeganise_user_id,
-         unit_number=EXCLUDED.unit_number,map_zone=EXCLUDED.map_zone,
-         raw_payload=EXCLUDED.raw_payload,updated_at=now()`,
-      [
-        randomUUID(), externalUnitId, userId, unitNumber ?? externalUnitId,
-        text(first(unit, "zone", "area", "section")), JSON.stringify(unit),
-      ],
-    );
+function roundMoney(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function taxInclusiveNet(total: number, taxRate: number) {
+  if (taxRate <= 0) return roundMoney(total);
+  const targetCents = Math.round(total * 100);
+  const estimate = Math.round(targetCents / (1 + taxRate / 100));
+  for (let offset = -10; offset <= 10; offset += 1) {
+    const netCents = estimate + offset;
+    const taxCents = Math.round(netCents * taxRate / 100);
+    if (netCents + taxCents === targetCents) return netCents / 100;
   }
+  return roundMoney(total / (1 + taxRate / 100));
+}
+
+function billingPeriod(data: JsonObject) {
+  const raw = text(first(data, "period", "invoiceDate", "date", "createdAt", "created_at", "dueDate"));
+  const date = raw ? new Date(raw) : new Date();
+  const valid = Number.isNaN(date.getTime()) ? new Date() : date;
+  return new Intl.DateTimeFormat("es-HN", { month: "long", year: "numeric", timeZone: "UTC" }).format(valid);
+}
+
+async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonObject) {
+  const lockClient = await getPool().connect();
+  const note = `Storeganise invoice: ${storeganiseInvoiceId}`;
+  try {
+    await lockClient.query("BEGIN");
+    await lockClient.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [storeganiseInvoiceId]);
+    const linked = await lockClient.query<{
+      billing_document_id: string | null;
+      amount: string;
+      currency: string;
+      customer_id: string | null;
+      unit_id: string | null;
+      unit_number: string | null;
+    }>(
+      `SELECT i.billing_document_id,i.amount::text,i.currency,c.id AS customer_id,
+              u.id AS unit_id,u.unit_number
+       FROM integration_invoices i
+       LEFT JOIN integration_customers c ON c.storeganise_user_id=i.storeganise_user_id AND c.disabled=false
+       LEFT JOIN LATERAL (
+         SELECT id,unit_number FROM customer_units
+         WHERE storeganise_user_id=i.storeganise_user_id AND status='ACTIVE'
+         ORDER BY updated_at DESC LIMIT 1
+       ) u ON true
+       WHERE i.storeganise_invoice_id=$1 AND i.deleted=false
+       FOR UPDATE OF i`,
+      [storeganiseInvoiceId],
+    );
+    if (!linked.rowCount) throw new Error("La factura sincronizada no está disponible para crear el documento fiscal.");
+    const row = linked.rows[0];
+    if (row.billing_document_id) {
+      await lockClient.query("COMMIT");
+      return { id: row.billing_document_id, duplicate: true };
+    }
+
+    const recovered = await lockClient.query<{ id: string }>(
+      `SELECT id FROM billing_documents WHERE notes=$1 LIMIT 1`, [note],
+    );
+    if (recovered.rowCount) {
+      await lockClient.query(
+        `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
+        [storeganiseInvoiceId, recovered.rows[0].id],
+      );
+      await lockClient.query("COMMIT");
+      return { id: recovered.rows[0].id, recovered: true };
+    }
+
+    if (!row.customer_id) throw new Error("La factura de Storeganise todavía no tiene un cliente sincronizado.");
+    const total = amount(row.amount);
+    if (total <= 0) throw new Error("El total recibido desde Storeganise debe ser mayor que cero.");
+    const configuredTax = Number(process.env.STOREGANISE_TAX_RATE ?? 15);
+    const taxRate = Number.isFinite(configuredTax) && configuredTax >= 0 ? configuredTax : 15;
+    const net = taxInclusiveNet(total, taxRate);
+    const unitLabel = row.unit_number?.trim() || "";
+    const period = billingPeriod(resource);
+    const description = unitLabel
+      ? `Bodega ${unitLabel} · Alquiler por 30 días · ${period}`
+      : `Alquiler de bodega · ${period}`;
+    const created = await createBillingDocument({
+      documentType: "INVOICE",
+      source: "CASH",
+      customerId: row.customer_id,
+      unitId: row.unit_id ?? undefined,
+      unitLabel: unitLabel || undefined,
+      items: [{
+        catalogCode: unitLabel ? "RENTAL_30_DAYS" : "STOREGANISE_RENTAL",
+        description,
+        quantity: 1,
+        unitPrice: net,
+        discountPercent: 0,
+        taxRate,
+      }],
+      notes: note,
+      status: "PENDING_PAYMENT",
+      currency: row.currency === "HNL" ? "HNL" : "USD",
+    });
+    await lockClient.query(
+      `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
+      [storeganiseInvoiceId, created.id],
+    );
+    await lockClient.query("COMMIT");
+    return { id: created.id, created: true };
+  } catch (error) {
+    await lockClient.query("ROLLBACK");
+    throw error;
+  } finally {
+    lockClient.release();
+  }
+}
+
+async function syncRental(eventType: string, rental: JsonObject, payload: JsonObject, apiUrl?: unknown) {
+  const embeddedUser = object(rental.user ?? rental.customer ?? rental.owner);
+  const userId = idFrom(rental, "userId", "customerId", "ownerId") ?? idFrom(embeddedUser, "id", "_id");
+  if (userId) {
+    const user = Object.keys(embeddedUser).length ? { ...embeddedUser, userId } : { ...await fetchStoreganiseUser(userId, apiUrl), userId };
+    await upsertCustomer("user.updated", user, payload);
+  }
+  const embeddedUnit = object(rental.unit);
+  const unitId = idFrom(rental, "unitId", "unit_id") ?? idFrom(embeddedUnit, "id", "_id");
+  const unit = Object.keys(embeddedUnit).length ? { ...embeddedUnit, unitId } : unitId ? { ...await fetchStoreganiseUnit(unitId, apiUrl), unitId } : {};
+  if (Object.keys(unit).length) await upsertCustomerUnit(eventType, unit, payload, userId);
+  const invoiceId = idFrom(rental, "invoiceId", "invoice_id");
+  if (invoiceId && eventType === "unitRental.invoice.created") {
+    const invoice = { ...await fetchStoreganiseInvoice(invoiceId, apiUrl), invoiceId };
+    await syncInvoiceCustomer(invoice, payload, apiUrl);
+    await upsertInvoice("invoice.updated", invoice, payload);
+    await ensurePortalInvoice(invoiceId, invoice);
+  }
+}
+
+async function syncUnit(eventType: string, unit: JsonObject, payload: JsonObject, apiUrl?: unknown) {
+  const rental = object(unit.unitRental ?? unit.rental);
+  const rentalId = idFrom(unit, "unitRentalId", "rentalId") ?? idFrom(rental, "id", "_id");
+  if (rentalId && !Object.keys(rental).length) {
+    await syncRental(eventType, { ...await fetchStoreganiseUnitRental(rentalId, apiUrl), unit }, payload, apiUrl);
+    return;
+  }
+  const embeddedUser = object(unit.user ?? unit.customer ?? unit.owner ?? rental.user ?? rental.customer);
+  const userId = idFrom(unit, "userId", "customerId", "ownerId") ?? idFrom(rental, "userId", "customerId", "ownerId") ?? idFrom(embeddedUser, "id", "_id");
+  if (userId) {
+    const user = Object.keys(embeddedUser).length ? { ...embeddedUser, userId } : { ...await fetchStoreganiseUser(userId, apiUrl), userId };
+    await upsertCustomer("user.updated", user, payload);
+  }
+  await upsertCustomerUnit(eventType, unit, payload, userId);
+}
+
+async function syncJob(eventType: string, job: JsonObject, payload: JsonObject, apiUrl?: unknown) {
+  const rental = object(job.unitRental ?? job.rental);
+  const rentalId = idFrom(job, "unitRentalId", "rentalId") ?? idFrom(rental, "id", "_id");
+  if (rentalId) {
+    const complete = Object.keys(rental).length ? { ...rental, unitRentalId: rentalId } : { ...await fetchStoreganiseUnitRental(rentalId, apiUrl), unitRentalId: rentalId };
+    await syncRental(eventType, complete, payload, apiUrl);
+    return;
+  }
+  await syncUnit(eventType, job, payload, apiUrl);
+}
+
+async function syncUnitFromResource(eventType: string, data: JsonObject, payload: JsonObject, userId: string | null) {
+  const rental = object(data.unitRental ?? data.rental);
+  const embeddedUnit = object(data.unit ?? rental.unit);
+  const unitId = idFrom(data, "unitId", "unit_id") ?? idFrom(rental, "unitId", "unit_id") ?? idFrom(embeddedUnit, "id", "_id");
+  if (!unitId && !Object.keys(embeddedUnit).length) return;
+  await upsertCustomerUnit(eventType, { ...embeddedUnit, unitId }, payload, userId);
+}
+
+async function upsertCustomerUnit(eventType: string, unit: JsonObject, payload: JsonObject, fallbackUserId: string | null) {
+  const rental = object(unit.unitRental ?? unit.rental);
+  const embeddedUser = object(unit.user ?? unit.customer ?? unit.owner ?? rental.user ?? rental.customer);
+  const userId = idFrom(unit, "userId", "customerId", "ownerId") ?? idFrom(rental, "userId", "customerId", "ownerId") ?? idFrom(embeddedUser, "id", "_id") ?? fallbackUserId;
+  const unitId = idFrom(unit, "unitId", "unit_id", "id", "_id");
+  const unitNumber = idFrom(unit, "unitNumber", "unitName", "number", "name", "label", "code", "sid");
+  if (!userId || (!unitId && !unitNumber)) return;
+  const externalUnitId = unitId ?? `${userId}:${unitNumber}`;
+  const inactive = eventType === "unit.unassigned" || eventType === "job.unit_moveOut.completed";
+  await getPool().query(
+    `INSERT INTO customer_units
+      (id,storeganise_unit_id,storeganise_user_id,unit_number,map_zone,status,raw_payload)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+     ON CONFLICT (storeganise_unit_id) DO UPDATE SET
+       storeganise_user_id=EXCLUDED.storeganise_user_id,unit_number=EXCLUDED.unit_number,
+       map_zone=EXCLUDED.map_zone,status=EXCLUDED.status,raw_payload=EXCLUDED.raw_payload,updated_at=now()`,
+    [
+      randomUUID(), externalUnitId, userId, unitNumber ?? externalUnitId,
+      text(first(unit, "zone", "area", "section", "mapZone")), inactive ? "INACTIVE" : "ACTIVE",
+      JSON.stringify(snapshot(payload, unit)),
+    ],
+  );
 }
