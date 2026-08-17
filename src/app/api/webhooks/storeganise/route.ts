@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
-import { assertIntegrationConfig } from "@/lib/server/integrations/config";
-import { verifySignedBody } from "@/lib/server/integrations/security";
+import { assertStoreganiseConfig } from "@/lib/server/integrations/config";
+import { verifyStoreganiseSignedBody } from "@/lib/server/integrations/security";
 import { processStoreganiseWebhook } from "@/lib/server/integrations/storeganise";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
-    assertIntegrationConfig();
+    assertStoreganiseConfig();
     const rawBody = await request.text();
     const signature = request.headers.get("sg-signature")
       ?? request.headers.get("x-storeganise-signature");
-    if (!verifySignedBody(rawBody, signature, process.env.STOREGANISE_WEBHOOK_SECRET)) {
+    if (!verifyStoreganiseSignedBody(rawBody, signature, process.env.STOREGANISE_WEBHOOK_SECRET)) {
       return NextResponse.json({ ok: false, error: "Firma Storeganise inválida." }, { status: 401 });
     }
     const payload = JSON.parse(rawBody || "{}") as Record<string, unknown>;
