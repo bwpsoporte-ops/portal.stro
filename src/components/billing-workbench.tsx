@@ -106,7 +106,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
     const occupancyByCode = new Map(occupancies.map((entry) => [entry.unit_code, entry]));
     return storageCodes.map((code, index) => {
       const actual = byNumber.get(code) ?? byNumber.get(String(index + 1));
-      const occupancy = occupancyByCode.get(code);
+      const occupancy = occupancyByCode.get(code) ?? (actual ? occupancyByCode.get(String(actual.unit_number)) : undefined);
       return actual
         ? { id: actual.id, storeganise_user_id: actual.storeganise_user_id, unit_number: code, sourceUnitNumber: actual.unit_number, map_zone: actual.map_zone, free: !occupancy, synthetic: false, occupied: Boolean(occupancy), occupantName: occupancy?.customer_name }
         : { id: `FREE-${code}`, storeganise_user_id: "", unit_number: code, sourceUnitNumber: code, map_zone: "Mapa principal", free: !occupancy, synthetic: true, occupied: Boolean(occupancy), occupantName: occupancy?.customer_name };
