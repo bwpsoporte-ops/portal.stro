@@ -423,8 +423,9 @@ export async function createBillingDocument(input: DocumentInput) {
         const existing = await client.query<{ id: string; customer_key: string; customer_name: string; status: string }>(
           `SELECT id,customer_key,customer_name,status FROM storage_occupancies WHERE unit_code=$1 FOR UPDATE`, [unitCode],
         );
-        if (existing.rowCount && existing.rows[0].status === "ACTIVE" && existing.rows[0].customer_key !== customerKey) {
-          throw new Error(`La bodega ${unitCode} ya está ocupada por ${existing.rows[0].customer_name}. No puede asignarse a otro cliente.`);
+        const storeganiseAutomatic = input.notes?.trim().startsWith("Storeganise invoice:") === true;
+        if (existing.rowCount && existing.rows[0].status === "ACTIVE" && (!storeganiseAutomatic || existing.rows[0].customer_key !== customerKey)) {
+          throw new Error(`La bodega ${unitCode} ya está ocupada por ${existing.rows[0].customer_name}. No puede facturarse nuevamente desde Caja.`);
         }
         await client.query(
           `INSERT INTO storage_occupancies
