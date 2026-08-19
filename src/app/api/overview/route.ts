@@ -11,8 +11,10 @@ export async function GET() {
     const db = getPool();
     const [metricsResult, fiscalResult, invoicesResult] = await Promise.all([
       db.query<{
-        billed_today: string;
-        billed_month: string;
+        billed_today_hnl: string;
+        billed_today_usd: string;
+        billed_month_hnl: string;
+        billed_month_usd: string;
         generated_invoices: number;
         sent_invoices: number;
       }>(
@@ -20,13 +22,23 @@ export async function GET() {
            COALESCE(SUM(CASE
              WHEN (created_at AT TIME ZONE 'America/Tegucigalpa')::date =
                   (now() AT TIME ZONE 'America/Tegucigalpa')::date
-             THEN CASE WHEN currency='HNL' AND COALESCE(exchange_rate,0)>0
-                       THEN total/exchange_rate ELSE total END ELSE 0 END),0)::text AS billed_today,
+             THEN CASE WHEN currency='HNL' THEN total
+                       ELSE COALESCE(NULLIF(equivalent_total,0),total*NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_today_hnl,
+           COALESCE(SUM(CASE
+             WHEN (created_at AT TIME ZONE 'America/Tegucigalpa')::date =
+                  (now() AT TIME ZONE 'America/Tegucigalpa')::date
+             THEN CASE WHEN currency='USD' THEN total
+                       ELSE COALESCE(total/NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_today_usd,
            COALESCE(SUM(CASE
              WHEN date_trunc('month',created_at AT TIME ZONE 'America/Tegucigalpa') =
                   date_trunc('month',now() AT TIME ZONE 'America/Tegucigalpa')
-             THEN CASE WHEN currency='HNL' AND COALESCE(exchange_rate,0)>0
-                       THEN total/exchange_rate ELSE total END ELSE 0 END),0)::text AS billed_month,
+             THEN CASE WHEN currency='HNL' THEN total
+                       ELSE COALESCE(NULLIF(equivalent_total,0),total*NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_month_hnl,
+           COALESCE(SUM(CASE
+             WHEN date_trunc('month',created_at AT TIME ZONE 'America/Tegucigalpa') =
+                  date_trunc('month',now() AT TIME ZONE 'America/Tegucigalpa')
+             THEN CASE WHEN currency='USD' THEN total
+                       ELSE COALESCE(total/NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_month_usd,
            COUNT(*)::integer AS generated_invoices,
            COUNT(*) FILTER (WHERE sent_at IS NOT NULL)::integer AS sent_invoices
          FROM billing_documents
@@ -53,7 +65,9 @@ export async function GET() {
          ORDER BY created_at DESC LIMIT 1`,
       ),
       db.query(
-        `SELECT id,document_number,customer_name,total,currency,status,sent_at,created_at,source
+        `SELECT id,document_number,customer_name,total,currency,status,sent_at,created_at,source,
+                CASE WHEN currency='HNL' THEN total ELSE COALESCE(NULLIF(equivalent_total,0),total*NULLIF(exchange_rate,0),0) END AS total_hnl,
+                CASE WHEN currency='USD' THEN total ELSE COALESCE(total/NULLIF(exchange_rate,0),0) END AS total_usd
          FROM billing_documents
          WHERE document_type='INVOICE' AND status<>'CANCELLED'
          ORDER BY created_at DESC LIMIT 5`,
