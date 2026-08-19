@@ -132,11 +132,13 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   const selectRentalUnit = (mapUnit: StorageMapUnit, owned: boolean) => {
     if (!manual && !selected) { setError("Selecciona primero el cliente de la factura."); return; }
     if (!manual && (!owned || mapUnit.synthetic)) { setError(`La bodega ${mapUnit.unit_number} no está asignada al cliente seleccionado.`); return; }
-    const occupancy = occupancies.find((entry) => entry.unit_code === mapUnit.unit_number);
-    const sameCustomer = manual
-      ? occupancy?.customer_key === `MANUAL:${(customer.email || customer.name).trim().toLowerCase()}`
-      : occupancy?.customer_id === customerId;
-    if (occupancy && !sameCustomer) { setError(`La bodega ${mapUnit.unit_number} ya está ocupada por ${occupancy.customer_name}. No puedes asignarla nuevamente.`); return; }
+    const occupancy = occupancies.find((entry) =>
+      entry.unit_code === mapUnit.unit_number || entry.unit_code === String(mapUnit.sourceUnitNumber),
+    );
+    if (occupancy) {
+      setError(`La bodega ${mapUnit.unit_number} está ocupada por ${occupancy.customer_name}. No puede facturarse nuevamente desde Caja.`);
+      return;
+    }
     const sourceUnit = units.find((unit) => unit.id === mapUnit.id);
     const alreadySelected = selectedUnits.some((entry) => entry.mapId === mapUnit.id);
     if (alreadySelected) {
