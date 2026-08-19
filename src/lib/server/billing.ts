@@ -5,6 +5,7 @@ import nodemailer from "nodemailer";
 import PDFDocument from "pdfkit";
 import { getPool } from "@/lib/server/db";
 import { ensureIntegrationSchema } from "@/lib/server/integrations/schema";
+import { getUsdToHnlRate } from "@/lib/server/exchange-rate";
 
 type LineInput = {
   catalogCode?: string;
@@ -619,7 +620,17 @@ export async function getDocument(id: string) {
 }
 
 export async function createBillingPdf(id: string, options?: { currency?: "USD" | "HNL"; language?: "es" | "en" }) {
-  const document = await getDocument(id);
+  let document = await getDocument(id);
+  if (document.source === "CASH" && document.currency === "USD" && document.notes?.startsWith("Storeganise invoice:") && !Number(document.exchange_rate)) {
+    const exchange = await getUsdToHnlRate();
+    await getPool().query(
+      `UPDATE billing_documents
+       SET exchange_rate=$2,equivalent_currency='HNL',equivalent_total=round(total*$2,2),updated_at=now()
+       WHERE id=$1 AND source='CASH' AND currency='USD' AND notes LIKE 'Storeganise invoice:%' AND COALESCE(exchange_rate,0)=0`,
+      [id, exchange.rate],
+    );
+    document = await getDocument(id);
+  }
   const templateResult = await getPool().query<{
     trade_name: string; legal_name: string; rtn: string; address: string;
     head_office_address: string | null; establishment_address: string | null;
