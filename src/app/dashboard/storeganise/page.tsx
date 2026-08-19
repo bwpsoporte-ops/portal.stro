@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
-import { invoices, money, payments, shortDate, storeganiseEvents } from "@/lib/dashboard-data";
+import { money, shortDate } from "@/lib/dashboard-data";
 
 type StoreganiseStatus = "RECEIVED" | "PROCESSING" | "PROCESSED" | "FAILED" | "RETRYING" | "IGNORED";
 
@@ -28,7 +28,7 @@ type StoreganiseLog = {
   reviewed: boolean;
 };
 
-const eventTypes = [
+const defaultEventTypes = [
   "unitRental.invoice.created",
   "invoice.updated",
   "invoice.state.updated",
@@ -41,49 +41,6 @@ const eventTypes = [
 
 const statuses: Array<StoreganiseStatus | "TODOS"> = ["TODOS", "RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "RETRYING", "IGNORED"];
 
-function mapStatus(status: string): StoreganiseStatus {
-  if (status === "PROCESADO") return "PROCESSED";
-  if (status === "ERROR") return "FAILED";
-  if (status === "REINTENTO") return "RETRYING";
-  return "RECEIVED";
-}
-
-function buildLogs(): StoreganiseLog[] {
-  return storeganiseEvents.map((event, index) => {
-    const invoice = invoices[index % invoices.length];
-    const payment = payments.find((item) => item.invoiceNumber === invoice?.number);
-    const status = mapStatus(event.status);
-
-    return {
-      id: event.id.toUpperCase(),
-      event: event.event,
-      customer: invoice?.client ?? "Cliente Storeganise",
-      email: invoice?.email ?? "cliente@storeganise.local",
-      storeganiseInvoiceId: event.payloadRef.startsWith("SG-INV") ? event.payloadRef : `SG-INV-${8800 + index}`,
-      storeganiseUserId: event.payloadRef.startsWith("SG-USER") ? event.payloadRef : `SG-USER-${1900 + index}`,
-      amount: invoice?.total ?? 0,
-      status,
-      receivedAt: event.receivedAt,
-      processedAt: status === "PROCESSED" ? event.receivedAt : undefined,
-      error: status === "FAILED" ? event.message : undefined,
-      retries: event.retries,
-      invoiceNumber: invoice?.number,
-      bacReference: payment?.bacReference,
-      reviewed: status === "PROCESSED",
-      payload: {
-        event_id: event.id,
-        event_type: event.event,
-        storeganise_invoice_id: event.payloadRef,
-        customer_name: invoice?.client ?? null,
-        customer_email: invoice?.email ?? null,
-        amount: invoice?.total ?? 0,
-        status,
-        duplicate_guard: Boolean(payment?.transactionId),
-      },
-    };
-  });
-}
-
 function statusToneForStoreganise(status: StoreganiseStatus) {
   if (status === "PROCESSED") return "green";
   if (status === "FAILED") return "red";
@@ -93,7 +50,9 @@ function statusToneForStoreganise(status: StoreganiseStatus) {
 }
 
 export default function StoreganisePage() {
-  const sourceLogs = useMemo(() => buildLogs(), []);
+  const [sourceLogs, setSourceLogs] = useState<StoreganiseLog[]>([]);
+  const [serverMetrics, setServerMetrics] = useState({ today: 0, processed: 0, failed: 0, invoices: 0, customers: 0, lastSync: null as string | null, retries: 0 });
+  const [connectionStatus, setConnectionStatus] = useState("VERIFICANDO");
   const [query, setQuery] = useState("");
   const [invoiceQuery, setInvoiceQuery] = useState("");
   const [eventType, setEventType] = useState("TODOS");
@@ -103,6 +62,29 @@ export default function StoreganisePage() {
   const [overrides, setOverrides] = useState<Record<string, StoreganiseStatus>>({});
   const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/integrations/storeganise", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.message ?? "No se pudo cargar la sincronización.");
+        if (!active) return;
+        setSourceLogs(data.logs ?? []);
+        setServerMetrics(data.metrics);
+        setConnectionStatus(data.connection?.status ?? "INCOMPLETA");
+        setMessage("");
+      } catch (failure) {
+        if (!active) return;
+        setConnectionStatus("CON ERROR");
+        setMessage(failure instanceof Error ? failure.message : "No se pudo cargar la sincronización.");
+      }
+    };
+    void load();
+    const interval = window.setInterval(() => void load(), 15000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, []);
 
   const logs = useMemo(
     () => sourceLogs.map((log) => ({ ...log, status: overrides[log.id] ?? log.status, reviewed: reviewed[log.id] ?? log.reviewed })),
@@ -120,24 +102,29 @@ export default function StoreganisePage() {
     });
   }, [date, eventType, invoiceQuery, logs, query, status]);
 
-  const metrics = useMemo(() => {
-    const today = logs.filter((log) => log.receivedAt.startsWith("2026-05-02")).length;
-    const lastSync = [...logs].sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime())[0];
-    return {
-      today,
-      processed: logs.filter((log) => log.status === "PROCESSED").length,
-      failed: logs.filter((log) => log.status === "FAILED").length,
-      invoices: logs.filter((log) => log.storeganiseInvoiceId.startsWith("SG-INV")).length,
-      customers: new Set(logs.map((log) => log.storeganiseUserId)).size,
-      lastSync: lastSync ? shortDate(lastSync.receivedAt) : "Sin sincronización",
-      retries: logs.filter((log) => log.status === "RETRYING" || log.retries > 0).length,
-      api: logs.some((log) => log.status === "FAILED") ? "CON ERRORES" : "OPERATIVA",
-    };
-  }, [logs]);
+  const eventTypes = useMemo(() => Array.from(new Set([...defaultEventTypes, ...logs.map((log) => log.event)])), [logs]);
 
-  const retryEvent = (id: string) => {
+  const metrics = useMemo(() => {
+    return {
+      ...serverMetrics,
+      lastSync: serverMetrics.lastSync ? shortDate(serverMetrics.lastSync) : "Sin sincronización",
+      api: connectionStatus,
+    };
+  }, [connectionStatus, serverMetrics]);
+
+  const retryEvent = async (id: string) => {
     setOverrides((current) => ({ ...current, [id]: "RETRYING" }));
-    setMessage(`Evento ${id} marcado para reintento. Estado interno: RETRYING.`);
+    setMessage(`Reintentando evento ${id}…`);
+    try {
+      const response = await fetch("/api/integrations/storeganise", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "RETRY", eventId: id }) });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.message ?? "No se pudo reintentar el evento.");
+      setOverrides((current) => ({ ...current, [id]: "PROCESSED" }));
+      setMessage(`Evento ${id} procesado correctamente.`);
+    } catch (failure) {
+      setOverrides((current) => ({ ...current, [id]: "FAILED" }));
+      setMessage(failure instanceof Error ? failure.message : "No se pudo reintentar el evento.");
+    }
   };
 
   return (
@@ -236,7 +223,7 @@ export default function StoreganisePage() {
                       <td>
                         <div className="flex min-w-[520px] flex-wrap gap-2">
                           <ActionButton variant="secondary" onClick={() => setSelected(log)}>Ver payload</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => retryEvent(log.id)}>Reintentar</ActionButton>
+                          <ActionButton variant="secondary" onClick={() => void retryEvent(log.id)}>Reintentar</ActionButton>
                           <ActionButton variant="secondary" onClick={() => setReviewed((current) => ({ ...current, [log.id]: true }))}>Marcar revisado</ActionButton>
                           <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/facturas">Ver factura</Link>
                           <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/pagos-bac">Ver pago</Link>
