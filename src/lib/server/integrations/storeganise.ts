@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getPool } from "@/lib/server/db";
 import { createBillingDocument } from "@/lib/server/billing";
+import { getUsdToHnlRate } from "@/lib/server/exchange-rate";
 import { ensureIntegrationSchema } from "./schema";
 import {
   fetchStoreganiseInvoice,
@@ -285,6 +286,9 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
     const description = unitLabel
       ? `Bodega ${unitLabel} · Alquiler por 30 días · ${period}`
       : `Alquiler de bodega · ${period}`;
+    const sourceCurrency = row.currency.toUpperCase() === "HNL" ? "HNL" : "USD";
+    const exchange = sourceCurrency === "USD" ? await getUsdToHnlRate() : null;
+    const equivalentTotal = exchange ? roundMoney(total * exchange.rate) : total;
     const created = await createBillingDocument({
       documentType: "INVOICE",
       source: "CASH",
@@ -301,7 +305,10 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
       }],
       notes: note,
       status: "PENDING_PAYMENT",
-      currency: row.currency === "HNL" ? "HNL" : "USD",
+      currency: sourceCurrency,
+      exchangeRate: exchange?.rate,
+      equivalentCurrency: sourceCurrency === "USD" ? "HNL" : "USD",
+      equivalentTotal,
     });
     await lockClient.query(
       `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
