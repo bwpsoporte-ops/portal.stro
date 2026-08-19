@@ -180,7 +180,7 @@ export default function PagosServiciosPage() {
     return storageCodes.map((code, index) => {
       const numericNumber = String(index + 1);
       const actual = byNumber.get(code) ?? byNumber.get(numericNumber);
-      const occupancy = occupancyByCode.get(code);
+      const occupancy = occupancyByCode.get(code) ?? (actual ? occupancyByCode.get(String(actual.unit_number)) : undefined);
       return actual
         ? { ...actual, unit_number: code, sourceUnitNumber: String(actual.unit_number), free: !occupancy, synthetic: false, occupancy }
         : { id: `FREE-${code}`, storeganise_user_id: "", unit_number: code, sourceUnitNumber: code, map_zone: "Mapa principal", free: !occupancy, synthetic: true, occupancy };
