@@ -801,33 +801,32 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(words.customer, 45, 171);
   const customerLegalName = document.customer_legal_name || document.customer_company_name;
   const customerDisplayName = customerLegalName || document.customer_name;
-  pdf.fillColor("#0f172a").fontSize(9).text(customerDisplayName, 45, 185, { width: 245, height: 13, ellipsis: true });
-  pdf.font("Helvetica").fontSize(6.5).fillColor("#475569");
-  let customerY = 199;
+  pdf.fillColor("#0f172a").fontSize(8.5).text(customerDisplayName, 45, 185, { width: 245, height: 12, ellipsis: true });
+  pdf.font("Helvetica").fontSize(5.8).fillColor("#475569");
+  let customerY = 198;
   if (customerLegalName && customerLegalName.toLowerCase() !== document.customer_name.toLowerCase()) {
-    pdf.text(`${language === "en" ? "Contact" : "Contacto"}: ${document.customer_name}`, 45, customerY, { width: 245, ellipsis: true });
-    customerY += 11;
+    pdf.text(`${language === "en" ? "Contact" : "Contacto"}: ${document.customer_name} · RTN: ${document.customer_rtn || (language === "en" ? "Not provided" : "No proporcionado")}`, 45, customerY, { width: 245, ellipsis: true });
+    customerY += 10;
+  } else {
+    pdf.text(`RTN: ${document.customer_rtn || (language === "en" ? "Not provided" : "No proporcionado")}`, 45, customerY, { width: 245, ellipsis: true });
+    customerY += 10;
   }
   if (document.customer_company_name && document.customer_company_name.toLowerCase() !== customerDisplayName.toLowerCase()) {
     pdf.text(`${language === "en" ? "Trade name" : "Nombre comercial"}: ${document.customer_company_name}`, 45, customerY, { width: 245, ellipsis: true });
-    customerY += 11;
+    customerY += 10;
   }
-  pdf.text(`RTN: ${document.customer_rtn || (language === "en" ? "Not provided" : "No proporcionado")}`, 45, customerY, { width: 245, ellipsis: true });
-  customerY += 11;
-  pdf.text(`${language === "en" ? "Email" : "Correo"}: ${document.customer_email || "-"}${document.customer_cc_emails ? ` · CC: ${document.customer_cc_emails}` : ""}`, 45, customerY, { width: 245, ellipsis: true });
-  customerY += 11;
-  pdf.text(`${language === "en" ? "Phone" : "Teléfono"}: ${document.customer_phone || "-"}`, 45, customerY, { width: 245, ellipsis: true });
-  customerY += 11;
-  pdf.text(`${language === "en" ? "Address" : "Dirección"}: ${document.customer_address || "-"}`, 45, customerY, { width: 245, height: 18, ellipsis: true });
-  customerY += 18;
+  pdf.text(`${language === "en" ? "Email" : "Correo"}: ${document.customer_email || "-"} · ${language === "en" ? "Phone" : "Tel."}: ${document.customer_phone || "-"}`, 45, customerY, { width: 245, ellipsis: true });
+  customerY += 10;
+  pdf.text(`${language === "en" ? "Address" : "Dirección"}: ${document.customer_address || "-"}`, 45, customerY, { width: 245, height: 12, ellipsis: true });
+  customerY += 12;
   pdf.text(`${language === "en" ? "Country" : "País"}: ${document.customer_country || "-"}${document.customer_language ? ` · ${language === "en" ? "Language" : "Idioma"}: ${document.customer_language}` : ""}`, 45, customerY, { width: 245, ellipsis: true });
-  customerY += 11;
+  customerY += 10;
   if (document.customer_storage_use) {
     pdf.text(`${language === "en" ? "Storage use" : "Uso del almacenamiento"}: ${document.customer_storage_use}`, 45, customerY, { width: 245, ellipsis: true });
-    customerY += 11;
+    customerY += 10;
   }
   if (document.customer_planned_storage) {
-    pdf.text(`${language === "en" ? "Planned contents" : "Contenido declarado"}: ${document.customer_planned_storage}`, 45, customerY, { width: 245, height: 18, ellipsis: true });
+    pdf.text(`${language === "en" ? "Planned contents" : "Contenido declarado"}: ${document.customer_planned_storage}`, 45, customerY, { width: 245, height: 12, ellipsis: true });
   }
 
   if (document.document_type === "INVOICE") {
@@ -849,7 +848,7 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
     pdf.fillColor("#334155").font("Helvetica").fontSize(7).text(language === "en" ? "Non-fiscal quotation. Does not consume CAI or correlative." : "Cotización no fiscal. No consume CAI ni correlativo.", 310, 165, { width: 245, align: "right" });
     pdf.text(document.unit_number ? `${words.unit}: ${document.unit_number}` : words.globalUnits, 310, 184, { width: 245, align: "right" });
   }
-  let y = 334;
+  let y = 289;
   pdf.roundedRect(45, y, 522, 24, 4).fill(primaryColor);
   pdf.fillColor("#ffffff").font("Helvetica-Bold").fontSize(5.6);
   pdf.text(words.description, 49, y + 8, { width: 164 });
