@@ -23,7 +23,21 @@ type DocumentInput = {
   unitId?: string;
   unitLabel?: string;
   unitAssignments?: Array<{ unitId?: string; unitLabel?: string }>;
-  customer?: { name?: string; email?: string; phone?: string; rtn?: string; address?: string };
+  customer?: {
+    name?: string;
+    email?: string;
+    phone?: string;
+    rtn?: string;
+    address?: string;
+    companyName?: string;
+    legalCompanyName?: string;
+    country?: string;
+    language?: string;
+    ccEmails?: string;
+    storageUse?: string;
+    plannedStorage?: string;
+    customFields?: Record<string, string>;
+  };
   items?: LineInput[];
   notes?: string;
   status?: string;
@@ -62,6 +76,14 @@ type StoredDocument = {
   customer_phone: string | null;
   customer_rtn: string | null;
   customer_address: string | null;
+  customer_company_name: string | null;
+  customer_legal_name: string | null;
+  customer_country: string | null;
+  customer_language: string | null;
+  customer_cc_emails: string | null;
+  customer_storage_use: string | null;
+  customer_planned_storage: string | null;
+  customer_custom_fields: Record<string, string> | null;
   subtotal: string;
   discount: string;
   tax: string;
@@ -152,7 +174,9 @@ export async function getBillingData(type?: string, includeCancelled = false) {
   const [customers, units, documents, catalog, fiscal, occupancies] = await Promise.all([
     db.query(
       `SELECT c.id,c.storeganise_user_id,c.first_name,c.last_name,c.email,c.phone,c.address,
-        c.billing_data,count(DISTINCT i.id)::integer AS invoice_count
+        c.billing_data,c.company_name,c.legal_company_name,c.country,c.language,c.cc_emails,
+        c.storage_use,c.planned_storage,c.custom_fields,
+        count(DISTINCT i.id)::integer AS invoice_count
        FROM integration_customers c
        LEFT JOIN integration_invoices i ON i.storeganise_user_id=c.storeganise_user_id AND i.deleted=false
        WHERE c.disabled=false GROUP BY c.id
@@ -212,6 +236,12 @@ export async function resetTestBilling(confirmText: string) {
     const documentIds = removed.rows.map((row) => row.id);
     const removedInvoices = removed.rows.filter((row) => row.document_type === "INVOICE").length;
     const removedProformas = removed.rows.filter((row) => row.document_type === "PROFORMA").length;
+    const removedServiceCharges = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM service_charges`,
+    );
+    const removedCustomers = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM integration_customers`,
+    );
     await client.query(
       `UPDATE storage_occupancies
        SET status='INACTIVE',last_invoice_id=NULL,updated_at=now()
@@ -229,6 +259,13 @@ export async function resetTestBilling(confirmText: string) {
         [documentIds],
       );
     }
+    await client.query(`DELETE FROM service_charges`);
+    await client.query(`DELETE FROM integration_payments`);
+    await client.query(`DELETE FROM integration_invoices`);
+    await client.query(`DELETE FROM storage_occupancies`);
+    await client.query(`DELETE FROM customer_units`);
+    await client.query(`DELETE FROM integration_customers`);
+    await client.query(`DELETE FROM integration_webhook_events`);
     await client.query(
       `UPDATE cai_ranges
        SET current_number=range_start,
@@ -243,21 +280,30 @@ export async function resetTestBilling(confirmText: string) {
            END)::cai_status,
            updated_at=now()`,
     );
-    const verification = await client.query<{ documents: string; incorrect_ranges: string; active_occupancies: string }>(
+    const verification = await client.query<{ documents: string; service_charges: string; integration_customers: string; incorrect_ranges: string; active_occupancies: string }>(
       `SELECT
          (SELECT count(*) FROM billing_documents)::text AS documents,
+         (SELECT count(*) FROM service_charges)::text AS service_charges,
+         (SELECT count(*) FROM integration_customers)::text AS integration_customers,
          (SELECT count(*) FROM cai_ranges WHERE current_number<>range_start)::text AS incorrect_ranges,
          (SELECT count(*) FROM storage_occupancies WHERE status='ACTIVE')::text AS active_occupancies`,
     );
     const check = verification.rows[0];
-    if (Number(check.documents) || Number(check.incorrect_ranges) || Number(check.active_occupancies)) {
+    if (Number(check.documents) || Number(check.service_charges) || Number(check.integration_customers) || Number(check.incorrect_ranges) || Number(check.active_occupancies)) {
       throw new Error("El reinicio no pudo dejar la facturación completamente en cero. No se aplicó ningún cambio.");
     }
     await client.query("COMMIT");
     const nextRanges = await client.query<{ cai: string; next_number: number }>(
       `SELECT cai,current_number AS next_number FROM cai_ranges WHERE status='ACTIVE' ORDER BY created_at DESC`,
     );
-    return { removedInvoices, removedProformas, releasedUnits: true, nextRanges: nextRanges.rows };
+    return {
+      removedInvoices,
+      removedProformas,
+      removedServiceCharges: Number(removedServiceCharges.rows[0]?.count ?? 0),
+      removedCustomers: Number(removedCustomers.rows[0]?.count ?? 0),
+      releasedUnits: true,
+      nextRanges: nextRanges.rows,
+    };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -277,13 +323,26 @@ export async function createBillingDocument(input: DocumentInput) {
     const result = await db.query<{
       first_name: string | null; last_name: string | null; email: string | null;
       phone: string | null; address: string | null; billing_data: Record<string, unknown>;
-    }>(`SELECT first_name,last_name,email,phone,address,billing_data FROM integration_customers WHERE id=$1 AND disabled=false`, [input.customerId]);
+      company_name: string | null; legal_company_name: string | null; country: string | null;
+      language: string | null; cc_emails: string | null; storage_use: string | null;
+      planned_storage: string | null; custom_fields: Record<string, string>;
+    }>(`SELECT first_name,last_name,email,phone,address,billing_data,company_name,
+               legal_company_name,country,language,cc_emails,storage_use,planned_storage,custom_fields
+        FROM integration_customers WHERE id=$1 AND disabled=false`, [input.customerId]);
     if (!result.rowCount) throw new Error("El cliente no existe.");
     const row = result.rows[0];
     customer = {
       name: [row.first_name, row.last_name].filter(Boolean).join(" ") || row.email || "Cliente",
       email: row.email ?? undefined, phone: row.phone ?? undefined, address: row.address ?? undefined,
       rtn: String(row.billing_data?.rtn ?? ""),
+      companyName: row.company_name ?? undefined,
+      legalCompanyName: row.legal_company_name ?? undefined,
+      country: row.country ?? undefined,
+      language: row.language ?? undefined,
+      ccEmails: row.cc_emails ?? undefined,
+      storageUse: row.storage_use ?? undefined,
+      plannedStorage: row.planned_storage ?? undefined,
+      customFields: row.custom_fields ?? {},
     };
   }
   if (!customer?.name?.trim()) throw new Error("Ingresa o selecciona el cliente.");
@@ -371,16 +430,22 @@ export async function createBillingDocument(input: DocumentInput) {
     await client.query(
       `INSERT INTO billing_documents
        (id,document_number,document_type,source,customer_id,unit_id,unit_label,customer_name,
-        customer_email,customer_phone,customer_rtn,customer_address,currency,
+        customer_email,customer_phone,customer_rtn,customer_address,
+        customer_company_name,customer_legal_name,customer_country,customer_language,
+        customer_cc_emails,customer_storage_use,customer_planned_storage,customer_custom_fields,currency,
         subtotal,discount,tax,total,status,notes,cai,fiscal_correlative,fiscal_range,fiscal_limit_date,
         exchange_rate,equivalent_currency,equivalent_total,
         exempt_purchase_order,exonerated_registry_number,sag_registry_number)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`,
       [
         id, documentNumber, input.documentType, input.source ?? "MANUAL",
         input.customerId ?? null, unitAssignments[0]?.unitId ?? null, unitAssignments.map((entry) => entry.unitLabel).join(", ") || null, customer.name.trim(),
         customer.email?.trim() || null, customer.phone?.trim() || null,
-        customer.rtn?.trim() || null, customer.address?.trim() || null, currency,
+        customer.rtn?.trim() || null, customer.address?.trim() || null,
+        customer.companyName?.trim() || null, customer.legalCompanyName?.trim() || null,
+        customer.country?.trim() || null, customer.language?.trim() || null,
+        customer.ccEmails?.trim() || null, customer.storageUse?.trim() || null,
+        customer.plannedStorage?.trim() || null, JSON.stringify(customer.customFields ?? {}), currency,
         subtotal, discount, tax, total, status, input.notes?.trim() || null,
         fiscal?.cai ?? null, fiscal?.correlative ?? null, fiscal?.range ?? null, fiscal?.limitDate ?? null,
         numeric(input.exchangeRate) || null,
@@ -547,6 +612,14 @@ export async function updateBillingDocument(id: string, action: string, input: R
         name: source.customer_name, email: source.customer_email ?? undefined,
         phone: source.customer_phone ?? undefined, rtn: source.customer_rtn ?? undefined,
         address: source.customer_address ?? undefined,
+        companyName: source.customer_company_name ?? undefined,
+        legalCompanyName: source.customer_legal_name ?? undefined,
+        country: source.customer_country ?? undefined,
+        language: source.customer_language ?? undefined,
+        ccEmails: source.customer_cc_emails ?? undefined,
+        storageUse: source.customer_storage_use ?? undefined,
+        plannedStorage: source.customer_planned_storage ?? undefined,
+        customFields: source.customer_custom_fields ?? {},
       },
       items: source.items.map((item) => ({
         catalogCode: item.catalogCode, description: item.description,
@@ -726,10 +799,36 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   pdf.moveTo(45, 158).lineTo(567, 158).strokeColor(primaryColor).stroke();
 
   pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(words.customer, 45, 171);
-  pdf.fillColor("#0f172a").fontSize(10).text(document.customer_name, 45, 187, { width: 245, height: 15, ellipsis: true });
-  pdf.font("Helvetica").fontSize(8).fillColor("#475569").text(`RTN: ${document.customer_rtn ?? "-"}`, 45, 205, { width: 245, ellipsis: true });
-  pdf.text(`${language === "en" ? "Email" : "Correo"}: ${document.customer_email ?? "-"}`, 45, 220, { width: 245, ellipsis: true });
-  pdf.text(`${language === "en" ? "Address" : "Dirección"}: ${document.customer_address ?? "-"}`, 45, 235, { width: 245, height: 28, lineGap: 1, ellipsis: true });
+  const customerLegalName = document.customer_legal_name || document.customer_company_name;
+  const customerDisplayName = customerLegalName || document.customer_name;
+  pdf.fillColor("#0f172a").fontSize(9).text(customerDisplayName, 45, 185, { width: 245, height: 13, ellipsis: true });
+  pdf.font("Helvetica").fontSize(6.5).fillColor("#475569");
+  let customerY = 199;
+  if (customerLegalName && customerLegalName.toLowerCase() !== document.customer_name.toLowerCase()) {
+    pdf.text(`${language === "en" ? "Contact" : "Contacto"}: ${document.customer_name}`, 45, customerY, { width: 245, ellipsis: true });
+    customerY += 11;
+  }
+  if (document.customer_company_name && document.customer_company_name.toLowerCase() !== customerDisplayName.toLowerCase()) {
+    pdf.text(`${language === "en" ? "Trade name" : "Nombre comercial"}: ${document.customer_company_name}`, 45, customerY, { width: 245, ellipsis: true });
+    customerY += 11;
+  }
+  pdf.text(`RTN: ${document.customer_rtn || (language === "en" ? "Not provided" : "No proporcionado")}`, 45, customerY, { width: 245, ellipsis: true });
+  customerY += 11;
+  pdf.text(`${language === "en" ? "Email" : "Correo"}: ${document.customer_email || "-"}${document.customer_cc_emails ? ` · CC: ${document.customer_cc_emails}` : ""}`, 45, customerY, { width: 245, ellipsis: true });
+  customerY += 11;
+  pdf.text(`${language === "en" ? "Phone" : "Teléfono"}: ${document.customer_phone || "-"}`, 45, customerY, { width: 245, ellipsis: true });
+  customerY += 11;
+  pdf.text(`${language === "en" ? "Address" : "Dirección"}: ${document.customer_address || "-"}`, 45, customerY, { width: 245, height: 18, ellipsis: true });
+  customerY += 18;
+  pdf.text(`${language === "en" ? "Country" : "País"}: ${document.customer_country || "-"}${document.customer_language ? ` · ${language === "en" ? "Language" : "Idioma"}: ${document.customer_language}` : ""}`, 45, customerY, { width: 245, ellipsis: true });
+  customerY += 11;
+  if (document.customer_storage_use) {
+    pdf.text(`${language === "en" ? "Storage use" : "Uso del almacenamiento"}: ${document.customer_storage_use}`, 45, customerY, { width: 245, ellipsis: true });
+    customerY += 11;
+  }
+  if (document.customer_planned_storage) {
+    pdf.text(`${language === "en" ? "Planned contents" : "Contenido declarado"}: ${document.customer_planned_storage}`, 45, customerY, { width: 245, height: 18, ellipsis: true });
+  }
 
   if (document.document_type === "INVOICE") {
     pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(words.fiscal, 310, 171, { width: 245, align: "right" });
@@ -750,7 +849,7 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
     pdf.fillColor("#334155").font("Helvetica").fontSize(7).text(language === "en" ? "Non-fiscal quotation. Does not consume CAI or correlative." : "Cotización no fiscal. No consume CAI ni correlativo.", 310, 165, { width: 245, align: "right" });
     pdf.text(document.unit_number ? `${words.unit}: ${document.unit_number}` : words.globalUnits, 310, 184, { width: 245, align: "right" });
   }
-  let y = 289;
+  let y = 334;
   pdf.roundedRect(45, y, 522, 24, 4).fill(primaryColor);
   pdf.fillColor("#ffffff").font("Helvetica-Bold").fontSize(5.6);
   pdf.text(words.description, 49, y + 8, { width: 164 });
