@@ -206,7 +206,7 @@ async function syncInvoiceCustomer(invoice: JsonObject, payload: JsonObject, api
   const userId = idFrom(invoice, "userId", "user_id", "customerId", "ownerId")
     ?? idFrom(embedded, "id", "_id", "userId");
   if (!userId) return;
-  const completeUser = await fetchStoreganiseUser(userId, apiUrl);
+  const completeUser = await fetchStoreganiseUser(userId, apiUrl).catch(() => ({}));
   const user = { ...embedded, ...completeUser, userId };
   await upsertCustomer("user.updated", user, payload);
 }
