@@ -48,6 +48,15 @@ async function createSchema() {
       updated_at timestamptz NOT NULL DEFAULT now()
     );
 
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS company_name text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS legal_company_name text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS country text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS language text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS cc_emails text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS storage_use text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS planned_storage text;
+    ALTER TABLE integration_customers ADD COLUMN IF NOT EXISTS custom_fields jsonb NOT NULL DEFAULT '{}'::jsonb;
+
     CREATE TABLE IF NOT EXISTS customer_units (
       id text PRIMARY KEY,
       storeganise_unit_id text NOT NULL UNIQUE,
@@ -205,6 +214,14 @@ async function createSchema() {
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS exonerated_registry_number text;
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS sag_registry_number text;
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS credited_amount numeric(14,2) NOT NULL DEFAULT 0;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_company_name text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_legal_name text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_country text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_language text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_cc_emails text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_storage_use text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_planned_storage text;
+    ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_custom_fields jsonb NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE integration_invoices
       ADD COLUMN IF NOT EXISTS billing_document_id text REFERENCES billing_documents(id) ON DELETE SET NULL;
 
