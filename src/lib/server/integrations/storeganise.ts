@@ -52,6 +52,74 @@ function snapshot(payload: JsonObject, resource: JsonObject) {
   return { webhook: payload, resource };
 }
 
+function normalizedLabel(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function fieldText(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (Array.isArray(value)) return value.map(fieldText).filter(Boolean).join(", ") || null;
+  if (typeof value === "object") {
+    const entry = object(value);
+    return fieldText(first(entry, "value", "text", "answer", "label", "name"));
+  }
+  return String(value);
+}
+
+function customFieldMap(data: JsonObject) {
+  const result: Record<string, string> = {};
+  const details = object(data.details ?? data.profile);
+  const sources = [
+    data.customFields,
+    data.custom_fields,
+    data.customFieldValues,
+    data.custom_field_values,
+    data.fields,
+    details.customFields,
+    details.custom_fields,
+    details.customFieldValues,
+  ];
+  for (const source of sources) {
+    if (Array.isArray(source)) {
+      for (const rawEntry of source) {
+        const entry = object(rawEntry);
+        const definition = object(entry.field ?? entry.customField ?? entry.definition);
+        const label = fieldText(first(entry, "label", "name", "title", "key", "code"))
+          ?? fieldText(first(definition, "label", "name", "title", "key", "code"));
+        const value = fieldText(first(entry, "value", "text", "answer", "values"));
+        if (label && value) result[label] = value;
+      }
+      continue;
+    }
+    const values = object(source);
+    for (const [key, rawValue] of Object.entries(values)) {
+      const entry = object(rawValue);
+      const definition = object(entry.field ?? entry.customField ?? entry.definition);
+      const label = fieldText(first(entry, "label", "name", "title"))
+        ?? fieldText(first(definition, "label", "name", "title"))
+        ?? key;
+      const value = Object.keys(entry).length
+        ? fieldText(first(entry, "value", "text", "answer", "values"))
+        : fieldText(rawValue);
+      if (label && value) result[label] = value;
+    }
+  }
+  return result;
+}
+
+function customValue(fields: Record<string, string>, ...aliases: string[]) {
+  const wanted = aliases.map(normalizedLabel);
+  for (const [label, value] of Object.entries(fields)) {
+    if (wanted.includes(normalizedLabel(label))) return value;
+  }
+  return null;
+}
+
 export function parseStoreganiseEvent(payload: JsonObject, rawBody: string) {
   const data = object(payload.data ?? payload.object ?? payload);
   const eventType = text(first(payload, "type", "event", "event_type", "name")) ?? "unknown";
@@ -138,9 +206,8 @@ async function syncInvoiceCustomer(invoice: JsonObject, payload: JsonObject, api
   const userId = idFrom(invoice, "userId", "user_id", "customerId", "ownerId")
     ?? idFrom(embedded, "id", "_id", "userId");
   if (!userId) return;
-  const user = Object.keys(embedded).length
-    ? { ...embedded, userId }
-    : { ...await fetchStoreganiseUser(userId, apiUrl), userId };
+  const completeUser = await fetchStoreganiseUser(userId, apiUrl);
+  const user = { ...embedded, ...completeUser, userId };
   await upsertCustomer("user.updated", user, payload);
 }
 
@@ -148,12 +215,33 @@ async function upsertCustomer(eventType: string, data: JsonObject, payload: Json
   const contact = object(data.contact ?? data.contactDetails ?? data.contact_data);
   const billing = object(data.billing ?? data.billingDetails ?? data.billing_data);
   const billingAddress = object(billing.address ?? billing.billingAddress);
+  const customFields = customFieldMap(data);
+  const fullName = fieldText(first(data, "fullName", "full_name", "name", "displayName"));
+  const nameParts = fullName?.trim().split(/\s+/) ?? [];
+  const firstName = text(first(data, "firstName", "first_name", "givenName")) ?? nameParts.shift() ?? null;
+  const lastName = text(first(data, "lastName", "last_name", "familyName")) ?? (nameParts.join(" ") || null);
+  const companyName = fieldText(first(data, "companyName", "company_name", "businessName"))
+    ?? fieldText(first(billing, "companyName", "company_name", "businessName"));
+  const legalCompanyName = customValue(customFields, "Legal Company Name", "Legal name", "Razón social", "Razon social")
+    ?? fieldText(first(billing, "legalCompanyName", "legal_name", "companyLegalName"));
+  const rtn = customValue(customFields, "RTN", "Tax ID", "Tax number", "Tax identification number")
+    ?? fieldText(first(billing, "rtn", "taxId", "tax_id", "taxNumber"));
+  const country = customValue(customFields, "Country", "País", "Pais")
+    ?? fieldText(first(data, "country", "countryName"))
+    ?? fieldText(first(billingAddress, "country", "countryName"));
+  const storageUse = customValue(customFields, "Storage use", "Uso del almacenamiento", "Storage usage");
+  const plannedStorage = customValue(customFields, "What do you plan to store?", "What do you plan to store", "Qué planea almacenar", "Que planea almacenar");
+  const language = fieldText(first(data, "language", "locale", "languageCode"));
+  const ccEmails = fieldText(first(data, "ccEmails", "cc_emails", "emailCc"))
+    ?? fieldText(first(contact, "ccEmails", "cc_emails", "emailCc"));
   const userId = idFrom(data, "userId", "user_id", "id", "_id");
   if (!userId) throw new Error("El recurso de usuario no contiene un identificador.");
   await getPool().query(
     `INSERT INTO integration_customers
-      (id,storeganise_user_id,email,first_name,last_name,phone,address,city,billing_data,disabled,raw_payload)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb)
+      (id,storeganise_user_id,email,first_name,last_name,phone,address,city,billing_data,
+       company_name,legal_company_name,country,language,cc_emails,storage_use,planned_storage,
+       custom_fields,disabled,raw_payload)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19::jsonb)
      ON CONFLICT (storeganise_user_id) DO UPDATE SET
        email=COALESCE(EXCLUDED.email,integration_customers.email),
        first_name=COALESCE(EXCLUDED.first_name,integration_customers.first_name),
@@ -162,16 +250,27 @@ async function upsertCustomer(eventType: string, data: JsonObject, payload: Json
        address=COALESCE(EXCLUDED.address,integration_customers.address),
        city=COALESCE(EXCLUDED.city,integration_customers.city),
        billing_data=CASE WHEN EXCLUDED.billing_data='{}'::jsonb THEN integration_customers.billing_data ELSE EXCLUDED.billing_data END,
+       company_name=COALESCE(EXCLUDED.company_name,integration_customers.company_name),
+       legal_company_name=COALESCE(EXCLUDED.legal_company_name,integration_customers.legal_company_name),
+       country=COALESCE(EXCLUDED.country,integration_customers.country),
+       language=COALESCE(EXCLUDED.language,integration_customers.language),
+       cc_emails=COALESCE(EXCLUDED.cc_emails,integration_customers.cc_emails),
+       storage_use=COALESCE(EXCLUDED.storage_use,integration_customers.storage_use),
+       planned_storage=COALESCE(EXCLUDED.planned_storage,integration_customers.planned_storage),
+       custom_fields=CASE WHEN EXCLUDED.custom_fields='{}'::jsonb THEN integration_customers.custom_fields ELSE EXCLUDED.custom_fields END,
        disabled=EXCLUDED.disabled,raw_payload=EXCLUDED.raw_payload,updated_at=now()`,
     [
       randomUUID(), userId,
       text(first(data, "email")) ?? text(first(contact, "email")),
-      text(first(data, "firstName", "first_name", "givenName")),
-      text(first(data, "lastName", "last_name", "familyName")),
+      firstName,
+      lastName,
       text(first(data, "phone", "phoneNumber", "mobile")) ?? text(first(contact, "phone", "phoneNumber", "mobile")),
       addressText(first(data, "address", "address1", "contactAddress")) ?? addressText(billing.address),
       text(first(data, "city")) ?? text(first(billingAddress, "city")),
-      JSON.stringify(billing), eventType === "user.disabled" || data.disabled === true || data.active === false,
+      JSON.stringify({ ...billing, rtn: rtn ?? first(billing, "rtn") }),
+      companyName, legalCompanyName, country, language, ccEmails, storageUse, plannedStorage,
+      JSON.stringify(customFields),
+      eventType === "user.disabled" || data.disabled === true || data.active === false,
       JSON.stringify(snapshot(payload, data)),
     ],
   );
