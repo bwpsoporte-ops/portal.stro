@@ -12,9 +12,9 @@ import {
 } from "./storeganise-api";
 
 export const STOREGANISE_EVENTS = new Set([
-  "invoice.payments.updated", "invoice.state.updated", "invoice.updated", "invoice.deleted",
+  "invoice.created", "invoice.payments.updated", "invoice.state.updated", "invoice.updated", "invoice.deleted",
   "user.disabled", "user.created", "user.updated", "user.billing.updated",
-  "job.unit_moveIn.create_started", "job.unit_moveIn.created", "job.unit_moveIn.started",
+  "job.unit_moveIn.create.started", "job.unit_moveIn.create_started", "job.unit_moveIn.created", "job.unit_moveIn.started",
   "job.unit_moveIn.completed", "job.unit_moveIn.cancelled",
   "job.unit_moveOut.created", "job.unit_moveOut.completed", "job.unit_moveOut.cancelled",
   "job.unit_transfer.completed",
@@ -39,6 +39,25 @@ function text(value: unknown) {
 
 function idFrom(data: JsonObject, ...keys: string[]) {
   return text(first(data, ...keys));
+}
+
+function nestedId(data: JsonObject, keys: string[]): string | null {
+  const queue: unknown[] = [data];
+  const visited = new Set<object>();
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current as object)) continue;
+    visited.add(current as object);
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+    const record = current as JsonObject;
+    const found = idFrom(record, ...keys);
+    if (found) return found;
+    queue.push(...Object.values(record));
+  }
+  return null;
 }
 
 function amount(value: unknown) {
@@ -170,6 +189,11 @@ export async function processStoreganiseWebhook(payload: JsonObject, rawBody: st
       } else {
         const user = await fetchStoreganiseUser(userId, apiUrl);
         await upsertCustomer(eventType, { ...data, ...user, userId }, payload);
+        const jobId = idFrom(data, "jobId", "job_id");
+        if (jobId) {
+          const job = await fetchStoreganiseJob(jobId, apiUrl);
+          await syncJob("job.unit_moveIn.created", { ...job, jobId, userId }, payload, apiUrl);
+        }
       }
     } else if (eventType.startsWith("invoice.")) {
       const invoiceId = idFrom(data, "invoiceId", "invoice_id", "id", "_id");
@@ -319,6 +343,38 @@ async function upsertInvoice(eventType: string, data: JsonObject, payload: JsonO
   await syncUnitFromResource(eventType, data, payload, userId);
 }
 
+async function syncInvoiceFromResource(
+  resource: JsonObject,
+  payload: JsonObject,
+  apiUrl?: unknown,
+) {
+  const embeddedInvoice = object(
+    resource.invoice
+    ?? resource.latestInvoice
+    ?? resource.currentInvoice
+    ?? resource.unitRentalInvoice,
+  );
+  const invoiceId = idFrom(resource, "invoiceId", "invoice_id", "storeganiseInvoiceId")
+    ?? idFrom(embeddedInvoice, "invoiceId", "invoice_id", "id", "_id")
+    ?? nestedId(resource, ["invoiceId", "invoice_id", "storeganiseInvoiceId"]);
+  if (!invoiceId) return null;
+
+  const fetchedInvoice = await fetchStoreganiseInvoice(invoiceId, apiUrl);
+  const resourceUser = object(resource.user ?? resource.customer ?? resource.owner);
+  const userId = idFrom(resource, "userId", "user_id", "customerId", "ownerId")
+    ?? idFrom(resourceUser, "id", "_id", "userId")
+    ?? nestedId(resource, ["userId", "user_id", "customerId", "ownerId"]);
+  const invoice = {
+    ...embeddedInvoice,
+    ...fetchedInvoice,
+    invoiceId,
+    ...(userId ? { userId } : {}),
+  };
+  await syncInvoiceCustomer(invoice, payload, apiUrl);
+  await upsertInvoice("invoice.updated", invoice, payload);
+  return ensurePortalInvoice(invoiceId, invoice);
+}
+
 function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
@@ -448,13 +504,7 @@ async function syncRental(eventType: string, rental: JsonObject, payload: JsonOb
   const unitId = idFrom(rental, "unitId", "unit_id") ?? idFrom(embeddedUnit, "id", "_id");
   const unit = Object.keys(embeddedUnit).length ? { ...embeddedUnit, unitId } : unitId ? { ...await fetchStoreganiseUnit(unitId, apiUrl), unitId } : {};
   if (Object.keys(unit).length) await upsertCustomerUnit(eventType, unit, payload, userId);
-  const invoiceId = idFrom(rental, "invoiceId", "invoice_id");
-  if (invoiceId && eventType === "unitRental.invoice.created") {
-    const invoice = { ...await fetchStoreganiseInvoice(invoiceId, apiUrl), invoiceId };
-    await syncInvoiceCustomer(invoice, payload, apiUrl);
-    await upsertInvoice("invoice.updated", invoice, payload);
-    await ensurePortalInvoice(invoiceId, invoice);
-  }
+  return syncInvoiceFromResource(rental, payload, apiUrl);
 }
 
 async function syncUnit(eventType: string, unit: JsonObject, payload: JsonObject, apiUrl?: unknown) {
@@ -478,10 +528,12 @@ async function syncJob(eventType: string, job: JsonObject, payload: JsonObject, 
   const rentalId = idFrom(job, "unitRentalId", "rentalId") ?? idFrom(rental, "id", "_id");
   if (rentalId) {
     const complete = Object.keys(rental).length ? { ...rental, unitRentalId: rentalId } : { ...await fetchStoreganiseUnitRental(rentalId, apiUrl), unitRentalId: rentalId };
-    await syncRental(eventType, complete, payload, apiUrl);
+    const rentalInvoice = await syncRental(eventType, complete, payload, apiUrl);
+    if (!rentalInvoice) await syncInvoiceFromResource({ ...job, ...complete }, payload, apiUrl);
     return;
   }
   await syncUnit(eventType, job, payload, apiUrl);
+  await syncInvoiceFromResource(job, payload, apiUrl);
 }
 
 async function syncUnitFromResource(eventType: string, data: JsonObject, payload: JsonObject, userId: string | null) {
