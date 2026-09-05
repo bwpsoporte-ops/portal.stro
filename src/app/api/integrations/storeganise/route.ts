@@ -117,8 +117,8 @@ export async function PATCH(request: Request) {
     );
     const event = result.rows[0];
     if (!event) return NextResponse.json({ ok: false, message: "El evento no existe." }, { status: 404 });
-    if (!["FAILED", "IGNORED"].includes(event.status)) {
-      return NextResponse.json({ ok: false, message: "Solamente se pueden reintentar eventos fallidos o ignorados." }, { status: 409 });
+    if (!["FAILED", "IGNORED", "PROCESSED"].includes(event.status)) {
+      return NextResponse.json({ ok: false, message: "El evento todavía está siendo procesado." }, { status: 409 });
     }
     await getPool().query(
       `UPDATE integration_webhook_events SET status='FAILED',error_message=NULL,processed_at=NULL WHERE lower(provider)='storeganise' AND event_id=$1`,
