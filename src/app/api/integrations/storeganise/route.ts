@@ -41,16 +41,19 @@ export async function GET() {
     const [eventsResult, customersResult, invoicesResult, unitsResult, totalsResult] = await Promise.all([
       db.query<EventRow>(`SELECT id,event_id,event_type,status,signature_valid,raw_payload,error_message,received_at,processed_at FROM integration_webhook_events WHERE lower(provider)='storeganise' ORDER BY received_at DESC LIMIT 250`),
       db.query<{ storeganise_user_id: string; name: string; email: string | null }>(`SELECT storeganise_user_id,trim(concat_ws(' ',first_name,last_name)) AS name,email FROM integration_customers WHERE disabled=false`),
-      db.query<{ storeganise_invoice_id: string; storeganise_user_id: string | null; amount: string; currency: string; document_number: string | null }>(`SELECT i.storeganise_invoice_id,i.storeganise_user_id,i.amount::text,i.currency,d.document_number FROM integration_invoices i LEFT JOIN billing_documents d ON d.id=i.billing_document_id WHERE i.deleted=false`),
+      db.query<{ storeganise_invoice_id: string; storeganise_user_id: string | null; origin_job_id: string | null; amount: string; currency: string; document_number: string | null }>(`SELECT i.storeganise_invoice_id,i.storeganise_user_id,i.origin_job_id,i.amount::text,i.currency,d.document_number FROM integration_invoices i LEFT JOIN billing_documents d ON d.id=i.billing_document_id WHERE i.deleted=false`),
       db.query<{ count: string }>(`SELECT count(*)::text AS count FROM customer_units`),
       db.query<{ customers: string; invoices: string; failed: string; today: string; last_sync: Date | null }>(`SELECT (SELECT count(*) FROM integration_customers WHERE disabled=false)::text AS customers,(SELECT count(*) FROM integration_invoices WHERE deleted=false)::text AS invoices,(SELECT count(*) FROM integration_webhook_events WHERE lower(provider)='storeganise' AND status='FAILED')::text AS failed,(SELECT count(*) FROM integration_webhook_events WHERE lower(provider)='storeganise' AND received_at::date=current_date)::text AS today,(SELECT max(received_at) FROM integration_webhook_events WHERE lower(provider)='storeganise') AS last_sync`),
     ]);
 
     const customers = new Map(customersResult.rows.map((row) => [row.storeganise_user_id, row]));
     const invoices = new Map(invoicesResult.rows.map((row) => [row.storeganise_invoice_id, row]));
+    const invoicesByJob = new Map(invoicesResult.rows.filter((row) => row.origin_job_id).map((row) => [row.origin_job_id!, row]));
     const logs = eventsResult.rows.map((row) => {
-      const storeganiseInvoiceId = textAt(row.raw_payload, ["invoiceId", "invoice_id", "invoice", "storeganiseInvoiceId"]);
-      const invoice = invoices.get(storeganiseInvoiceId);
+      const payloadInvoiceId = textAt(row.raw_payload, ["invoiceId", "invoice_id", "invoice", "storeganiseInvoiceId"]);
+      const jobId = textAt(row.raw_payload, ["jobId", "job_id"]);
+      const invoice = invoices.get(payloadInvoiceId) ?? invoicesByJob.get(jobId);
+      const storeganiseInvoiceId = payloadInvoiceId || invoice?.storeganise_invoice_id || "";
       const storeganiseUserId = invoice?.storeganise_user_id ?? textAt(row.raw_payload, ["userId", "user_id", "customerId", "customer_id"]);
       const customer = customers.get(storeganiseUserId);
       return {
