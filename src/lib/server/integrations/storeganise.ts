@@ -201,6 +201,10 @@ function customValue(fields: Record<string, string>, ...aliases: string[]) {
   return null;
 }
 
+function configuredFieldCode(name: string, fallback: string) {
+  return process.env[name]?.trim() || fallback;
+}
+
 export function parseStoreganiseEvent(payload: JsonObject, rawBody: string) {
   const data = object(payload.data ?? payload.object ?? payload);
   const eventType = text(first(payload, "type", "event", "event_type", "name")) ?? "unknown";
@@ -318,17 +322,39 @@ async function upsertCustomer(eventType: string, data: JsonObject, payload: Json
   const nameParts = fullName?.trim().split(/\s+/) ?? [];
   const firstName = text(first(data, "firstName", "first_name", "givenName")) ?? nameParts.shift() ?? null;
   const lastName = text(first(data, "lastName", "last_name", "familyName")) ?? (nameParts.join(" ") || null);
-  const companyName = fieldText(first(data, "companyName", "company_name", "businessName"))
-    ?? fieldText(first(billing, "companyName", "company_name", "businessName"));
-  const legalCompanyName = customValue(customFields, "Legal Company Name", "Legal name", "Razón social", "Razon social")
-    ?? fieldText(first(billing, "legalCompanyName", "legal_name", "companyLegalName"));
-  const rtn = customValue(customFields, "RTN", "Tax ID", "Tax number", "Tax identification number")
-    ?? fieldText(first(billing, "rtn", "taxId", "tax_id", "taxNumber"));
-  const country = customValue(customFields, "Country", "País", "Pais")
+  const companyName = fieldText(first(data, "companyName", "company_name", "businessName", "tradeName"))
+    ?? fieldText(first(billing, "companyName", "company_name", "businessName", "tradeName"))
+    ?? customValue(
+      customFields,
+      "Company name", "Company", "Business name", "Trade name", "Nombre comercial",
+      configuredFieldCode("STOREGANISE_COMPANY_FIELD_CODE", "company_name"),
+    );
+  const legalCompanyName = fieldText(first(data, "legalCompanyName", "legal_company_name", "legalName", "companyLegalName"))
+    ?? fieldText(first(billing, "legalCompanyName", "legal_company_name", "legalName", "companyLegalName"))
+    ?? customValue(
+      customFields,
+      "Legal Company Name", "Legal name", "Razón social", "Razon social",
+      configuredFieldCode("STOREGANISE_LEGAL_COMPANY_FIELD_CODE", "co1"),
+    );
+  const rtn = fieldText(first(data, "rtn", "taxId", "tax_id", "taxNumber", "tax_number"))
+    ?? fieldText(first(billing, "rtn", "taxId", "tax_id", "taxNumber", "tax_number"))
+    ?? customValue(
+      customFields,
+      "RTN", "Tax ID", "Tax number", "Tax identification number",
+      configuredFieldCode("STOREGANISE_RTN_FIELD_CODE", "c02"),
+    );
+  const country = customValue(customFields, "Country", "País", "Pais", "pais")
     ?? fieldText(first(data, "country", "countryName"))
     ?? fieldText(first(billingAddress, "country", "countryName"));
-  const storageUse = customValue(customFields, "Storage use", "Uso del almacenamiento", "Storage usage");
-  const plannedStorage = customValue(customFields, "What do you plan to store?", "What do you plan to store", "Qué planea almacenar", "Que planea almacenar");
+  const storageUse = customValue(
+    customFields,
+    "Storage use", "Uso del almacenamiento", "Storage usage", "type_of_use", "Type of use",
+  );
+  const plannedStorage = customValue(
+    customFields,
+    "What do you plan to store?", "What do you plan to store", "Qué planea almacenar",
+    "Que planea almacenar", "items_to_be_stored", "Items to be stored",
+  );
   const language = fieldText(first(data, "language", "locale", "languageCode"));
   const ccEmails = fieldText(first(data, "ccEmails", "cc_emails", "emailCc"))
     ?? fieldText(first(contact, "ccEmails", "cc_emails", "emailCc"));
@@ -371,6 +397,38 @@ async function upsertCustomer(eventType: string, data: JsonObject, payload: Json
       eventType === "user.disabled" || data.disabled === true || data.active === false,
       JSON.stringify(snapshot(payload, data)),
     ],
+  );
+
+  await refreshPendingInvoiceCustomer(userId);
+}
+
+async function refreshPendingInvoiceCustomer(storeganiseUserId: string) {
+  await getPool().query(
+    `UPDATE billing_documents AS document
+     SET customer_name=COALESCE(NULLIF(TRIM(CONCAT_WS(' ',customer.first_name,customer.last_name)),''),document.customer_name),
+         customer_email=COALESCE(customer.email,document.customer_email),
+         customer_phone=COALESCE(customer.phone,document.customer_phone),
+         customer_rtn=COALESCE(NULLIF(customer.billing_data->>'rtn',''),document.customer_rtn),
+         customer_address=COALESCE(customer.address,document.customer_address),
+         customer_company_name=COALESCE(customer.company_name,document.customer_company_name),
+         customer_legal_name=COALESCE(customer.legal_company_name,document.customer_legal_name),
+         customer_country=COALESCE(customer.country,document.customer_country),
+         customer_language=COALESCE(customer.language,document.customer_language),
+         customer_cc_emails=COALESCE(customer.cc_emails,document.customer_cc_emails),
+         customer_storage_use=COALESCE(customer.storage_use,document.customer_storage_use),
+         customer_planned_storage=COALESCE(customer.planned_storage,document.customer_planned_storage),
+         customer_custom_fields=CASE
+           WHEN customer.custom_fields='{}'::jsonb THEN document.customer_custom_fields
+           ELSE customer.custom_fields
+         END,
+         updated_at=now()
+     FROM integration_customers AS customer
+     WHERE customer.storeganise_user_id=$1
+       AND document.customer_id=customer.id
+       AND document.document_type='INVOICE'
+       AND document.status IN ('PENDING_PAYMENT','PARTIALLY_PAID')
+       AND document.sent_at IS NULL`,
+    [storeganiseUserId],
   );
 }
 
