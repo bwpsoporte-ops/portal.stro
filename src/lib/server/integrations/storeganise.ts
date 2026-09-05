@@ -14,9 +14,13 @@ import {
 export const STOREGANISE_EVENTS = new Set([
   "invoice.payments.updated", "invoice.state.updated", "invoice.updated", "invoice.deleted",
   "user.disabled", "user.created", "user.updated", "user.billing.updated",
-  "job.unit_moveIn.created", "job.unit_moveIn.completed",
-  "job.unit_moveOut.created", "job.unit_moveOut.completed",
-  "unit.occupied", "unit.unassigned", "unitRental.updated", "unitRental.invoice.created",
+  "job.unit_moveIn.create_started", "job.unit_moveIn.created", "job.unit_moveIn.started",
+  "job.unit_moveIn.completed", "job.unit_moveIn.cancelled",
+  "job.unit_moveOut.created", "job.unit_moveOut.completed", "job.unit_moveOut.cancelled",
+  "job.unit_transfer.completed",
+  "unit.updated", "unit.reserved", "unit.occupied", "unit.blocked", "unit.unassigned",
+  "unit.unblocked", "unit.archived",
+  "unitRental.updated", "unitRental.charges.updated", "unitRental.invoice.created",
 ]);
 
 type JsonObject = Record<string, unknown>;
@@ -155,8 +159,18 @@ export async function processStoreganiseWebhook(payload: JsonObject, rawBody: st
     if (eventType.startsWith("user.")) {
       const userId = idFrom(data, "userId", "user_id", "id", "_id");
       if (!userId) throw new Error("El webhook de usuario no contiene userId.");
-      const user = await fetchStoreganiseUser(userId, apiUrl);
-      await upsertCustomer(eventType, { ...data, ...user, userId }, payload);
+      if (eventType === "user.disabled") {
+        const disabled = await db.query(
+          `UPDATE integration_customers SET disabled=true,updated_at=now() WHERE storeganise_user_id=$1`,
+          [userId],
+        );
+        if (!disabled.rowCount) {
+          await upsertCustomer(eventType, { ...data, userId, disabled: true }, payload);
+        }
+      } else {
+        const user = await fetchStoreganiseUser(userId, apiUrl);
+        await upsertCustomer(eventType, { ...data, ...user, userId }, payload);
+      }
     } else if (eventType.startsWith("invoice.")) {
       const invoiceId = idFrom(data, "invoiceId", "invoice_id", "id", "_id");
       if (!invoiceId) throw new Error("El webhook de factura no contiene invoiceId.");
@@ -486,7 +500,10 @@ async function upsertCustomerUnit(eventType: string, unit: JsonObject, payload: 
   const unitNumber = idFrom(unit, "unitNumber", "unitName", "number", "name", "label", "code", "sid");
   if (!userId || (!unitId && !unitNumber)) return;
   const externalUnitId = unitId ?? `${userId}:${unitNumber}`;
-  const inactive = eventType === "unit.unassigned" || eventType === "job.unit_moveOut.completed";
+  const inactive = eventType === "unit.unassigned"
+    || eventType === "unit.archived"
+    || eventType === "job.unit_moveOut.completed";
+  const status = eventType === "unit.blocked" ? "BLOCKED" : inactive ? "INACTIVE" : "ACTIVE";
   await getPool().query(
     `INSERT INTO customer_units
       (id,storeganise_unit_id,storeganise_user_id,unit_number,map_zone,status,raw_payload)
@@ -496,7 +513,7 @@ async function upsertCustomerUnit(eventType: string, unit: JsonObject, payload: 
        map_zone=EXCLUDED.map_zone,status=EXCLUDED.status,raw_payload=EXCLUDED.raw_payload,updated_at=now()`,
     [
       randomUUID(), externalUnitId, userId, unitNumber ?? externalUnitId,
-      text(first(unit, "zone", "area", "section", "mapZone")), inactive ? "INACTIVE" : "ACTIVE",
+      text(first(unit, "zone", "area", "section", "mapZone")), status,
       JSON.stringify(snapshot(payload, unit)),
     ],
   );
