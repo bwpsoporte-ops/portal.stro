@@ -30,6 +30,7 @@ type StoreganiseLog = {
 
 const defaultEventTypes = [
   "unitRental.invoice.created",
+  "invoice.created",
   "invoice.updated",
   "invoice.state.updated",
   "invoice.payments.updated",
@@ -231,7 +232,7 @@ export default function StoreganisePage() {
                       <td>
                         <div className="flex min-w-[520px] flex-wrap gap-2">
                           <ActionButton variant="secondary" onClick={() => setSelected(log)}>Ver payload</ActionButton>
-                          {log.status === "FAILED" || log.status === "IGNORED" ? <ActionButton variant="secondary" onClick={() => void retryEvent(log.id)}>Reintentar</ActionButton> : null}
+                          {!["RECEIVED", "PROCESSING", "RETRYING"].includes(log.status) ? <ActionButton variant="secondary" onClick={() => void retryEvent(log.id)}>{log.status === "PROCESSED" ? "Reprocesar" : "Reintentar"}</ActionButton> : null}
                           <ActionButton variant="secondary" onClick={() => setReviewed((current) => ({ ...current, [log.id]: true }))}>Marcar revisado</ActionButton>
                           {log.invoiceNumber ? <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/facturas">Ver factura</Link> : null}
                           <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/pagos-bac">Ver pago</Link>
