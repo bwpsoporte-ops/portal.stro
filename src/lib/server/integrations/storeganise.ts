@@ -61,8 +61,66 @@ function nestedId(data: JsonObject, keys: string[]): string | null {
 }
 
 function amount(value: unknown) {
-  const parsed = Number(value ?? 0);
+  const raw = String(value ?? "").trim().replace(/[^\d,.-]/g, "");
+  const normalized = raw.includes(".") && raw.includes(",")
+    ? raw.replace(/,/g, "")
+    : raw.replace(",", ".");
+  const parsed = Number(normalized || 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function amountFromResource(resource: JsonObject) {
+  const containers = [
+    resource,
+    object(resource.summary),
+    object(resource.totals),
+    object(resource.pricing),
+    object(resource.order),
+    object(resource.unitRental ?? resource.rental),
+    object(resource.unitType),
+  ];
+  const keys = [
+    "grandTotal", "totalAmount", "moveInTotal", "amountDue", "dueNow",
+    "total", "amount", "rentalPrice", "monthlyPrice", "price",
+  ];
+  for (const key of keys) {
+    for (const container of containers) {
+      const value = amount(container[key]);
+      if (value > 0) return value;
+    }
+  }
+  const itemLists = [resource.items, resource.lines, resource.lineItems, resource.charges];
+  for (const rawItems of itemLists) {
+    if (!Array.isArray(rawItems)) continue;
+    const total = rawItems.reduce((sum, rawItem) => {
+      const item = object(rawItem);
+      const itemTotal = amount(first(item, "total", "totalAmount", "amount"));
+      if (itemTotal > 0) return sum + itemTotal;
+      const unitPrice = amount(first(item, "unitPrice", "price", "rate"));
+      const quantity = Math.max(1, amount(first(item, "quantity", "qty")));
+      return sum + unitPrice * quantity;
+    }, 0);
+    if (total > 0) return roundMoney(total);
+  }
+  return 0;
+}
+
+function currencyFromResource(resource: JsonObject) {
+  const containers = [
+    resource,
+    object(resource.summary),
+    object(resource.totals),
+    object(resource.pricing),
+    object(resource.order),
+    object(resource.unitRental ?? resource.rental),
+    object(resource.unitType),
+  ];
+  for (const container of containers) {
+    const raw = first(container, "currency", "currencyCode");
+    const value = text(first(object(raw), "code")) ?? text(raw);
+    if (value) return value.toUpperCase() === "HNL" ? "HNL" : "USD";
+  }
+  return "USD";
 }
 
 function addressText(value: unknown) {
@@ -192,7 +250,9 @@ export async function processStoreganiseWebhook(payload: JsonObject, rawBody: st
         const jobId = idFrom(data, "jobId", "job_id");
         if (jobId) {
           const job = await fetchStoreganiseJob(jobId, apiUrl);
-          await syncJob("job.unit_moveIn.created", { ...job, jobId, userId }, payload, apiUrl);
+          const completeJob = { ...job, jobId, userId };
+          const linkedInvoice = await syncJob("job.unit_moveIn.created", completeJob, payload, apiUrl);
+          if (!linkedInvoice) await ensurePortalInvoiceFromJob(jobId, completeJob, payload, userId);
         }
       }
     } else if (eventType.startsWith("invoice.")) {
@@ -323,24 +383,63 @@ async function upsertInvoice(eventType: string, data: JsonObject, payload: JsonO
   const total = first(data, "amount", "total", "amountDue", "balance", "grandTotal");
   const currencyValue = first(data, "currency", "currencyCode");
   const currency = text(first(object(currencyValue), "code")) ?? text(currencyValue) ?? "USD";
+  const originJobId = idFrom(data, "jobId", "job_id")
+    ?? nestedId(data, ["jobId", "job_id"]);
   await getPool().query(
     `INSERT INTO integration_invoices
-      (id,storeganise_invoice_id,storeganise_user_id,amount,currency,storeganise_status,raw_payload,deleted)
-     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
+      (id,storeganise_invoice_id,storeganise_user_id,amount,currency,storeganise_status,raw_payload,deleted,origin_job_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$12)
      ON CONFLICT (storeganise_invoice_id) DO UPDATE SET
        storeganise_user_id=COALESCE(EXCLUDED.storeganise_user_id,integration_invoices.storeganise_user_id),
        amount=CASE WHEN $9 THEN EXCLUDED.amount ELSE integration_invoices.amount END,
        currency=CASE WHEN $10 THEN EXCLUDED.currency ELSE integration_invoices.currency END,
        storeganise_status=CASE WHEN $11 THEN EXCLUDED.storeganise_status ELSE integration_invoices.storeganise_status END,
+       origin_job_id=COALESCE(EXCLUDED.origin_job_id,integration_invoices.origin_job_id),
        raw_payload=EXCLUDED.raw_payload,deleted=EXCLUDED.deleted,updated_at=now()`,
     [
       randomUUID(), invoiceId, userId, amount(total), currency, text(statusValue) ?? "UNKNOWN",
       JSON.stringify(snapshot(payload, data)), eventType === "invoice.deleted",
       total !== undefined && total !== null, currencyValue !== undefined && currencyValue !== null,
       statusValue !== undefined && statusValue !== null,
+      originJobId,
     ],
   );
   await syncUnitFromResource(eventType, data, payload, userId);
+}
+
+async function ensurePortalInvoiceFromJob(
+  jobId: string,
+  job: JsonObject,
+  payload: JsonObject,
+  fallbackUserId: string,
+) {
+  const total = amountFromResource(job);
+  if (total <= 0) {
+    throw new Error(
+      `El trabajo ${jobId} fue recibido, pero Storeganise todavía no proporciona un monto facturable. Reprocesa el evento cuando el ingreso esté confirmado.`,
+    );
+  }
+  const embeddedUser = object(job.user ?? job.customer ?? job.owner);
+  const userId = idFrom(job, "userId", "user_id", "customerId", "ownerId")
+    ?? idFrom(embeddedUser, "id", "_id", "userId")
+    ?? fallbackUserId;
+  const externalInvoiceId = `JOB:${jobId}`;
+  await getPool().query(
+    `INSERT INTO integration_invoices
+      (id,storeganise_invoice_id,storeganise_user_id,amount,currency,storeganise_status,
+       raw_payload,deleted,origin_job_id)
+     VALUES ($1,$2,$3,$4,$5,'PENDING_PAYMENT',$6::jsonb,false,$7)
+     ON CONFLICT (storeganise_invoice_id) DO UPDATE SET
+       storeganise_user_id=EXCLUDED.storeganise_user_id,
+       amount=EXCLUDED.amount,currency=EXCLUDED.currency,
+       storeganise_status='PENDING_PAYMENT',raw_payload=EXCLUDED.raw_payload,
+       deleted=false,origin_job_id=EXCLUDED.origin_job_id,updated_at=now()`,
+    [
+      randomUUID(), externalInvoiceId, userId, total, currencyFromResource(job),
+      JSON.stringify(snapshot(payload, job)), jobId,
+    ],
+  );
+  return ensurePortalInvoice(externalInvoiceId, job);
 }
 
 async function syncInvoiceFromResource(
@@ -411,8 +510,11 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
       customer_id: string | null;
       unit_id: string | null;
       unit_number: string | null;
+      storeganise_user_id: string | null;
+      origin_job_id: string | null;
     }>(
-      `SELECT i.billing_document_id,i.amount::text,i.currency,c.id AS customer_id,
+      `SELECT i.billing_document_id,i.amount::text,i.currency,i.storeganise_user_id,
+              i.origin_job_id,c.id AS customer_id,
               u.id AS unit_id,u.unit_number
        FROM integration_invoices i
        LEFT JOIN integration_customers c ON c.storeganise_user_id=i.storeganise_user_id AND c.disabled=false
@@ -430,6 +532,32 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
     if (row.billing_document_id) {
       await lockClient.query("COMMIT");
       return { id: row.billing_document_id, duplicate: true };
+    }
+
+    const jobDocument = await lockClient.query<{ id: string; billing_document_id: string }>(
+      `SELECT id,billing_document_id
+       FROM integration_invoices
+       WHERE storeganise_invoice_id<>$1
+         AND billing_document_id IS NOT NULL
+         AND storeganise_invoice_id LIKE 'JOB:%'
+         AND (
+           ($2::text IS NOT NULL AND origin_job_id=$2)
+           OR ($3::text IS NOT NULL AND storeganise_user_id=$3 AND created_at>=now()-INTERVAL '2 days')
+         )
+       ORDER BY created_at DESC LIMIT 1`,
+      [storeganiseInvoiceId, row.origin_job_id, row.storeganise_user_id],
+    );
+    if (jobDocument.rowCount) {
+      await lockClient.query(
+        `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
+        [storeganiseInvoiceId, jobDocument.rows[0].billing_document_id],
+      );
+      await lockClient.query(
+        `UPDATE integration_invoices SET deleted=true,updated_at=now() WHERE id=$1`,
+        [jobDocument.rows[0].id],
+      );
+      await lockClient.query("COMMIT");
+      return { id: jobDocument.rows[0].billing_document_id, reconciled: true };
     }
 
     const recovered = await lockClient.query<{ id: string }>(
@@ -529,11 +657,19 @@ async function syncJob(eventType: string, job: JsonObject, payload: JsonObject, 
   if (rentalId) {
     const complete = Object.keys(rental).length ? { ...rental, unitRentalId: rentalId } : { ...await fetchStoreganiseUnitRental(rentalId, apiUrl), unitRentalId: rentalId };
     const rentalInvoice = await syncRental(eventType, complete, payload, apiUrl);
-    if (!rentalInvoice) await syncInvoiceFromResource({ ...job, ...complete }, payload, apiUrl);
-    return;
+    if (rentalInvoice) return rentalInvoice;
+    return syncInvoiceFromResource({ ...job, ...complete }, payload, apiUrl);
   }
   await syncUnit(eventType, job, payload, apiUrl);
-  await syncInvoiceFromResource(job, payload, apiUrl);
+  const linkedInvoice = await syncInvoiceFromResource(job, payload, apiUrl);
+  if (linkedInvoice) return linkedInvoice;
+  if (["job.unit_moveIn.created", "job.unit_moveIn.started", "job.unit_moveIn.completed"].includes(eventType)) {
+    const jobId = idFrom(job, "jobId", "job_id", "id", "_id");
+    const userId = idFrom(job, "userId", "user_id", "customerId", "ownerId")
+      ?? nestedId(job, ["userId", "user_id", "customerId", "ownerId"]);
+    if (jobId && userId) return ensurePortalInvoiceFromJob(jobId, job, payload, userId);
+  }
+  return null;
 }
 
 async function syncUnitFromResource(eventType: string, data: JsonObject, payload: JsonObject, userId: string | null) {
