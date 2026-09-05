@@ -224,6 +224,7 @@ async function createSchema() {
     ALTER TABLE billing_documents ADD COLUMN IF NOT EXISTS customer_custom_fields jsonb NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE integration_invoices
       ADD COLUMN IF NOT EXISTS billing_document_id text REFERENCES billing_documents(id) ON DELETE SET NULL;
+    ALTER TABLE integration_invoices ADD COLUMN IF NOT EXISTS origin_job_id text;
 
     CREATE TABLE IF NOT EXISTS credit_notes (
       id text PRIMARY KEY,
