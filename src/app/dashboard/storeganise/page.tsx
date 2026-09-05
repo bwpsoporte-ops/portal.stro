@@ -16,7 +16,7 @@ type StoreganiseLog = {
   email: string;
   storeganiseInvoiceId: string;
   storeganiseUserId: string;
-  amount: number;
+  amount: number | null;
   status: StoreganiseStatus;
   receivedAt: string;
   processedAt?: string;
@@ -36,7 +36,15 @@ const defaultEventTypes = [
   "user.created",
   "user.updated",
   "user.billing.updated",
-  "addon.dailyEvent.started",
+  "unit.updated",
+  "unit.reserved",
+  "unit.occupied",
+  "unit.unassigned",
+  "unitRental.updated",
+  "unitRental.charges.updated",
+  "job.unit_moveIn.started",
+  "job.unit_moveIn.completed",
+  "job.unit_moveOut.completed",
 ];
 
 const statuses: Array<StoreganiseStatus | "TODOS"> = ["TODOS", "RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "RETRYING", "IGNORED"];
@@ -215,7 +223,7 @@ export default function StoreganisePage() {
                         <p className="text-xs text-slate-500">{log.email}</p>
                       </td>
                       <td>{log.storeganiseInvoiceId}</td>
-                      <td className="font-black">{money(log.amount)}</td>
+                      <td className="font-black">{log.amount === null ? <span className="text-xs text-slate-400">No aplica</span> : money(log.amount)}</td>
                       <td><StatusBadge tone={statusToneForStoreganise(log.status)}>{log.status}</StatusBadge></td>
                       <td>{shortDate(log.receivedAt)}</td>
                       <td>{log.processedAt ? shortDate(log.processedAt) : "Pendiente"}</td>
@@ -223,9 +231,9 @@ export default function StoreganisePage() {
                       <td>
                         <div className="flex min-w-[520px] flex-wrap gap-2">
                           <ActionButton variant="secondary" onClick={() => setSelected(log)}>Ver payload</ActionButton>
-                          <ActionButton variant="secondary" onClick={() => void retryEvent(log.id)}>Reintentar</ActionButton>
+                          {log.status === "FAILED" || log.status === "IGNORED" ? <ActionButton variant="secondary" onClick={() => void retryEvent(log.id)}>Reintentar</ActionButton> : null}
                           <ActionButton variant="secondary" onClick={() => setReviewed((current) => ({ ...current, [log.id]: true }))}>Marcar revisado</ActionButton>
-                          <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/facturas">Ver factura</Link>
+                          {log.invoiceNumber ? <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/facturas">Ver factura</Link> : null}
                           <Link className="rounded-md border border-sky-200 bg-white px-3 py-2 text-sm font-black text-sky-700 transition hover:bg-sky-50" href="/dashboard/pagos-bac">Ver pago</Link>
                         </div>
                       </td>
@@ -240,7 +248,7 @@ export default function StoreganisePage() {
         <section className="rounded-lg border border-slate-200 bg-white p-4">
           <h2 className="font-black text-slate-950">Flujo de integración</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-5">
-            {["Storeganise recibe evento", "Pagos BAC genera transacción", "Facturas emite al pagar", "Alertas detecta errores", "Reportes consolida"].map((step) => (
+            {["Storeganise recibe evento", "Portal sincroniza cliente y bodega", "Factura fiscal queda pendiente", "Caja confirma pago manual", "BAC automatizará la confirmación"].map((step) => (
               <div key={step} className="rounded-md border border-sky-100 bg-sky-50 p-3 text-sm font-bold text-slate-700">{step}</div>
             ))}
           </div>
