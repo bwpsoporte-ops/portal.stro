@@ -168,22 +168,40 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
     setError("");
     setMessage(monthlyPrice > 0 ? `Bodega ${mapUnit.unit_number} seleccionada. Se cargó su alquiler de 30 días.` : `Bodega ${mapUnit.unit_number} seleccionada. Escribe el precio del alquiler de 30 días.`);
   };
-  const changeCurrency = (nextCurrency: "USD" | "HNL") => {
-    if (nextCurrency === currency || !usdToHnl) return;
-
-    setItems((current) => current.map((item) => ({
-      ...item,
-      unitPrice: item.unitPrice
-        ? Number((nextCurrency === "HNL"
-          ? item.unitPrice * usdToHnl
-          : item.unitPrice / usdToHnl).toFixed(2))
-        : 0,
-    })));
-    setCurrency(nextCurrency);
+  const refreshExchangeRate = async () => {
+    const response = await fetch("/api/exchange-rate?refresh=1", { cache: "no-store" });
+    const exchange = await response.json();
+    if (!response.ok || !Number.isFinite(exchange.rate) || exchange.rate <= 0) {
+      throw new Error(exchange.message ?? "No se pudo consultar la tasa de venta. Intenta nuevamente.");
+    }
+    setUsdToHnl(exchange.rate);
+    return exchange.rate as number;
+  };
+  const changeCurrency = async (nextCurrency: "USD" | "HNL") => {
+    if (nextCurrency === currency) return;
+    setError("");
+    try {
+      const rate = await refreshExchangeRate();
+      setItems((current) => current.map((item) => ({
+        ...item,
+        unitPrice: item.unitPrice
+          ? Number((nextCurrency === "HNL"
+            ? item.unitPrice * rate
+            : item.unitPrice / rate).toFixed(2))
+          : 0,
+      })));
+      setCurrency(nextCurrency);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "No se pudo cambiar la moneda.");
+    }
   };
   const submit = async (event: FormEvent, status?: string) => {
     event.preventDefault(); setSaving(true); setError(""); setMessage("");
     try {
+      const latestRate = await refreshExchangeRate();
+      if (Math.abs(latestRate - usdToHnl) > 0.000001) {
+        throw new Error("Se actualizó la tasa de venta del BCH. Revisa los importes y vuelve a guardar el documento.");
+      }
       const response = await fetch("/api/billing", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -318,7 +336,52 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
                 <p className="flex justify-between text-sm"><span>Subtotal</span><strong>{money(totals.subtotal, currency)}</strong></p><p className="mt-2 flex justify-between text-sm"><span>Impuestos</span><strong>{money(totals.tax, currency)}</strong></p><p className="mt-3 flex justify-between border-t border-white/20 pt-3 text-xl font-black"><span>Total</span><span>{money(total, currency)}</span></p>
               </div>
               <textarea className="min-h-20 w-full rounded-lg border border-slate-200 p-3 text-sm" placeholder="Notas y condiciones" value={notes} onChange={(e) => setNotes(e.target.value)} />
-              {!isProforma ? <section className="rounded-xl border border-amber-200 bg-amber-50 p-4"><div><h3 className="text-sm font-black text-amber-950">Referencias de exención o exoneración</h3><p className="mt-1 text-xs text-amber-800">Déjalas vacías para cobrar el ISV normalmente. Al ingresar cualquiera, la factura se emitirá sin ISV y conservará el código en el PDF.</p></div><div className="mt-3 grid gap-3"><label className="text-xs font-black text-slate-700">No. Orden de compra exenta<TextInput placeholder="Código de la orden exenta" value={fiscalReferences.exemptPurchaseOrder} onChange={(event) => setFiscalReferences((current) => ({ ...current, exemptPurchaseOrder: event.currentTarget.value }))} /></label><label className="text-xs font-black text-slate-700">No. Constancia del registro exonerado<TextInput placeholder="Número de constancia" value={fiscalReferences.exoneratedRegistryNumber} onChange={(event) => setFiscalReferences((current) => ({ ...current, exoneratedRegistryNumber: event.currentTarget.value }))} /></label><label className="text-xs font-black text-slate-700">No. Identificativo del registro de la SAG<TextInput placeholder="Identificativo SAG" value={fiscalReferences.sagRegistryNumber} onChange={(event) => setFiscalReferences((current) => ({ ...current, sagRegistryNumber: event.currentTarget.value }))} /></label></div>{hasFiscalExemption ? <div className="mt-3 rounded-lg bg-emerald-100 p-3 text-xs font-black text-emerald-900">Exención activa: ISV 0%. El código quedará registrado en la factura.</div> : null}</section> : null}
+              {!isProforma ? (
+                <section className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <div>
+                    <h3 className="text-sm font-black text-amber-950">Referencias de exención o exoneración</h3>
+                    <p className="mt-1 text-xs text-amber-800">Déjalas vacías para cobrar el ISV normalmente. Al ingresar cualquiera, la factura se emitirá sin ISV y conservará el código en el PDF.</p>
+                  </div>
+                  <div className="mt-3 grid gap-3">
+                    <label className="text-xs font-black text-slate-700">
+                      No. Orden de compra exenta
+                      <TextInput
+                        placeholder="Código de la orden exenta"
+                        value={fiscalReferences.exemptPurchaseOrder}
+                        onChange={(event) => {
+                          const value = event.currentTarget.value;
+                          setFiscalReferences((current) => ({ ...current, exemptPurchaseOrder: value }));
+                        }}
+                      />
+                    </label>
+                    <label className="text-xs font-black text-slate-700">
+                      No. Constancia del registro exonerado
+                      <TextInput
+                        placeholder="Número de constancia"
+                        value={fiscalReferences.exoneratedRegistryNumber}
+                        onChange={(event) => {
+                          const value = event.currentTarget.value;
+                          setFiscalReferences((current) => ({ ...current, exoneratedRegistryNumber: value }));
+                        }}
+                      />
+                    </label>
+                    <label className="text-xs font-black text-slate-700">
+                      No. Identificativo del registro de la SAG
+                      <TextInput
+                        placeholder="Identificativo SAG"
+                        value={fiscalReferences.sagRegistryNumber}
+                        onChange={(event) => {
+                          const value = event.currentTarget.value;
+                          setFiscalReferences((current) => ({ ...current, sagRegistryNumber: value }));
+                        }}
+                      />
+                    </label>
+                  </div>
+                  {hasFiscalExemption ? (
+                    <div className="mt-3 rounded-lg bg-emerald-100 p-3 text-xs font-black text-emerald-900">Exención activa: ISV 0%. El código quedará registrado en la factura.</div>
+                  ) : null}
+                </section>
+              ) : null}
               <div className="flex flex-wrap justify-end gap-2">{isProforma ? <><ActionButton variant="secondary" type="submit">{saving ? "Guardando..." : "Guardar borrador"}</ActionButton><ActionButton onClick={() => { const form = document.querySelector("form"); if (form) void submit({ preventDefault: () => {} } as FormEvent, "SENT"); }}>Guardar como enviada</ActionButton></> : <ActionButton type="submit">{saving ? "Facturando..." : "Crear factura"}</ActionButton>}</div>
             </section>
           </div>
