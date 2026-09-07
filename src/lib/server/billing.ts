@@ -393,6 +393,17 @@ export async function createBillingDocument(input: DocumentInput) {
   const prefix = input.documentType === "PROFORMA" ? "PRO" : "INV";
   let documentNumber = `${prefix}-${new Date().getFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`;
   const currency = input.currency === "HNL" ? "HNL" : "USD";
+  // Resolver la venta BCH antes de consumir CAI; no confiar en la tasa de una pestaña antigua.
+  let exchange = await getUsdToHnlRate();
+  if (numeric(input.exchangeRate) > 0 && Math.abs(numeric(input.exchangeRate) - exchange.rate) > 0.000001) {
+    // Vercel puede atender el formulario y la emisión en instancias con cachés diferentes.
+    exchange = await getUsdToHnlRate(true);
+  }
+  if (input.source === "SERVICE" && Math.abs(numeric(input.exchangeRate) - exchange.rate) > 0.000001) {
+    throw new Error("La tasa de venta se actualizó. Vuelve a generar la factura de servicios para revisar los totales con la tasa vigente.");
+  }
+  const equivalentCurrency = currency === "USD" ? "HNL" : "USD";
+  const equivalentTotal = round(currency === "USD" ? total * exchange.rate : total / exchange.rate);
   let fiscal: { cai: string; correlative: number; range: string; limitDate: string } | null = null;
   const status = input.status || (input.documentType === "PROFORMA" ? "DRAFT" : "PENDING_PAYMENT");
 
@@ -448,9 +459,9 @@ export async function createBillingDocument(input: DocumentInput) {
         customer.plannedStorage?.trim() || null, JSON.stringify(customer.customFields ?? {}), currency,
         subtotal, discount, tax, total, status, input.notes?.trim() || null,
         fiscal?.cai ?? null, fiscal?.correlative ?? null, fiscal?.range ?? null, fiscal?.limitDate ?? null,
-        numeric(input.exchangeRate) || null,
-        input.equivalentCurrency ?? null,
-        numeric(input.equivalentTotal) || null,
+        exchange.rate,
+        equivalentCurrency,
+        equivalentTotal,
         input.exemptPurchaseOrder?.trim() || null,
         input.exoneratedRegistryNumber?.trim() || null,
         input.sagRegistryNumber?.trim() || null,
