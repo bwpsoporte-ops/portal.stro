@@ -8,7 +8,7 @@ import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/
 type Mode = "cash" | "proforma";
 type Customer = { id: string; storeganise_user_id: string; first_name: string | null; last_name: string | null; email: string | null; phone: string | null; address: string | null; billing_data: Record<string, unknown>; invoice_count: number };
 type Unit = { id: string; storeganise_user_id: string; unit_number: string; map_zone: string | null; raw_payload?: Record<string, unknown> };
-type Item = { catalogCode: string; description: string; quantity: number; unitPrice: number; discountPercent: number; taxRate: number };
+type Item = { catalogCode: string; description: string; quantity: number; unitPrice: string; discountPercent: number; taxRate: number };
 type BillingDocument = { id: string; document_number: string; customer_name: string; customer_email: string | null; unit_id: string | null; currency: "USD" | "HNL"; total: string; amount_paid: string; credited_amount: string; status: string; created_at: string };
 type PeriodFilter = "ALL" | "DAY" | "WEEK" | "MONTH";
 type FiscalConfig = { cai: string; range_start: number; range_end: number; current_number: number; expiration_date: string; establishment: string; emission_point: string; document_type: string };
@@ -20,7 +20,7 @@ const inputNumber = (value: string) => {
   const parsed = Number(value.trim().replace(/\s/g, "").replace(",", "."));
   return Number.isFinite(parsed) ? parsed : 0;
 };
-const blankItem = (): Item => ({ catalogCode: "", description: "", quantity: 1, unitPrice: 0, discountPercent: 0, taxRate: 15 });
+const blankItem = (): Item => ({ catalogCode: "", description: "", quantity: 1, unitPrice: "", discountPercent: 0, taxRate: 15 });
 const matchesPeriod = (dateValue: string, period: PeriodFilter) => {
   if (period === "ALL") return true;
   const date = new Date(dateValue);
@@ -117,7 +117,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   ).slice(0, 8);
   const hasFiscalExemption = Object.values(fiscalReferences).some((value) => value.trim().length > 0);
   const totals = items.reduce((sum, item) => {
-    const gross = item.quantity * item.unitPrice;
+    const gross = item.quantity * inputNumber(item.unitPrice);
     const discounted = gross * (1 - item.discountPercent / 100);
     return { subtotal: sum.subtotal + discounted, tax: sum.tax + discounted * (hasFiscalExemption ? 0 : item.taxRate) / 100 };
   }, { subtotal: 0, tax: 0 });
@@ -156,13 +156,13 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
       catalogCode: "RENTAL_30_DAYS",
       description: `Bodega ${mapUnit.unit_number} · Alquiler por 30 días`,
       quantity: 1,
-      unitPrice: monthlyPrice,
+      unitPrice: monthlyPrice > 0 ? String(monthlyPrice) : "",
       discountPercent: 0,
       taxRate: 15,
     };
     setSelectedUnits((current) => [...current, { mapId: mapUnit.id, unitId: mapUnit.synthetic ? undefined : mapUnit.id, unitLabel: mapUnit.unit_number }]);
     setItems((current) => {
-      const useful = current.filter((item) => item.description.trim() || item.unitPrice > 0);
+      const useful = current.filter((item) => item.description.trim() || inputNumber(item.unitPrice) > 0);
       return [rental, ...useful];
     });
     setError("");
@@ -182,14 +182,15 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
     setError("");
     try {
       const rate = await refreshExchangeRate();
-      setItems((current) => current.map((item) => ({
-        ...item,
-        unitPrice: item.unitPrice
-          ? Number((nextCurrency === "HNL"
-            ? item.unitPrice * rate
-            : item.unitPrice / rate).toFixed(2))
-          : 0,
-      })));
+      setItems((current) => current.map((item) => {
+        const priceText = item.unitPrice.trim().replace(/\s/g, "").replace(",", ".");
+        const price = Number(priceText);
+        if (!priceText || !Number.isFinite(price)) return item;
+        return {
+          ...item,
+          unitPrice: (nextCurrency === "HNL" ? price * rate : price / rate).toFixed(2),
+        };
+      }));
       setCurrency(nextCurrency);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "No se pudo cambiar la moneda.");
@@ -198,6 +199,14 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
   const submit = async (event: FormEvent, status?: string) => {
     event.preventDefault(); setSaving(true); setError(""); setMessage("");
     try {
+      const invoiceItems = items.map((item) => {
+        const priceText = item.unitPrice.trim().replace(/\s/g, "").replace(",", ".");
+        const unitPrice = Number(priceText);
+        if (!priceText || !Number.isFinite(unitPrice) || unitPrice < 0) {
+          throw new Error("Ingresa un precio válido, mayor o igual a cero.");
+        }
+        return { ...item, unitPrice, taxRate: hasFiscalExemption ? 0 : item.taxRate };
+      });
       const latestRate = await refreshExchangeRate();
       if (Math.abs(latestRate - usdToHnl) > 0.000001) {
         throw new Error("Se actualizó la tasa de venta del BCH. Revisa los importes y vuelve a guardar el documento.");
@@ -211,7 +220,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
           unitLabel: selectedUnits.map((entry) => entry.unitLabel).join(", ") || undefined,
           unitAssignments: selectedUnits.map((entry) => ({ unitId: entry.unitId, unitLabel: entry.unitLabel })),
           customer: manual ? customer : undefined,
-          items: items.map((item) => ({ ...item, taxRate: hasFiscalExemption ? 0 : item.taxRate })),
+          items: invoiceItems,
           notes,
           ...fiscalReferences,
           status: isProforma ? (status ?? "DRAFT") : "PENDING_PAYMENT", currency,
@@ -326,7 +335,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
                 <div key={index} className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-6">
                   <TextInput required className="md:col-span-3" placeholder="Descripción del producto, servicio o cargo" value={item.description} onChange={(e) => updateItem(index, { description: e.target.value })} />
                   <TextInput required inputMode="decimal" placeholder="Cantidad" value={item.quantity || ""} onChange={(event) => updateItem(index, { quantity: inputNumber(event.currentTarget.value) })} />
-                  <TextInput required inputMode="decimal" placeholder="Precio" value={item.unitPrice || ""} onChange={(event) => updateItem(index, { unitPrice: inputNumber(event.currentTarget.value) })} />
+                  <TextInput required inputMode="decimal" placeholder="Precio" value={item.unitPrice} onChange={(event) => updateItem(index, { unitPrice: event.currentTarget.value })} />
                   <button type="button" disabled={items.length === 1} onClick={() => setItems(items.filter((_, i) => i !== index))} className="rounded-md text-xs font-black text-rose-600 disabled:opacity-30">Eliminar</button>
                   <label className="text-xs font-bold text-slate-500">Descuento %<TextInput inputMode="decimal" value={item.discountPercent || ""} onChange={(event) => updateItem(index, { discountPercent: inputNumber(event.currentTarget.value) })} /></label>
                   <label className="text-xs font-bold text-slate-500">Impuesto %<TextInput inputMode="decimal" value={item.taxRate || ""} onChange={(event) => updateItem(index, { taxRate: inputNumber(event.currentTarget.value) })} /></label>
