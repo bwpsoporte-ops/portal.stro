@@ -1,3 +1,4 @@
+
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -740,6 +741,13 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   // guardada y USD se muestra únicamente como equivalencia informativa.
   const renderCurrency = "HNL" as const;
   const language = options?.language ?? "es";
+  // Solo las proformas y sus facturas convertidas muestran estas condiciones.
+  // Las notas de otros orígenes pueden contener referencias internas.
+  const notes = document.document_type === "PROFORMA" || document.source === "PROFORMA"
+    ? document.notes?.trim() ?? ""
+    : "";
+  const notesTitle = language === "en" ? "NOTES AND TERMS" : "NOTAS Y CONDICIONES";
+  let notesNeedAppendix = false;
   const exchangeRate = Number(document.exchange_rate) || 0;
   const hnlRate = exchangeRate || (document.currency === "USD" && Number(document.equivalent_total)
     ? Number(document.equivalent_total) / Number(document.total)
@@ -961,6 +969,7 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
     ["Subtotal", converted(document.subtotal)], ["ISV 15%", taxAt(15)],
     ["ISV 18%", taxAt(18)],
   ];
+  const notesTop = y;
   pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(language === "en" ? "FISCAL SUMMARY" : "RESUMEN FISCAL", 315, y, { width: 240 });
   y += 14;
   for (const [label, value] of fiscalRows) {
@@ -982,6 +991,22 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   pdf.font("Helvetica-Bold").text(language === "en" ? "TOTAL EQUIVALENT IN USD:" : "TOTAL EQUIVALENTE EN USD:", 315, y, { width: 155 });
   pdf.text(`USD ${fiscalAmount(totalUsd)}`, 470, y, { width: 85, align: "right" });
   y += 16;
+
+  if (notes) {
+    const notesOptions = { width: 245, lineGap: 2 };
+    pdf.font("Helvetica").fontSize(7);
+    notesNeedAppendix = pdf.heightOfString(notes, notesOptions) > y - notesTop - 20;
+    pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8)
+      .text(notesTitle, 45, notesTop, { width: 245 });
+    pdf.fillColor("#334155").font("Helvetica").fontSize(7).text(
+      notesNeedAppendix
+        ? (language === "en"
+          ? "See the complete notes and terms at the end of this document."
+          : "Consulta las notas y condiciones completas al final de este documento.")
+        : notes,
+      45, notesTop + 14, notesOptions,
+    );
+  }
 
   if (language === "es") {
     pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(7).text(`SON: ${amountInSpanish(totalHnl, "HNL")}.`, 45, y, { width: 510, lineGap: 1 });
@@ -1033,6 +1058,27 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   pdf.text(language === "en" ? "Copy: Issuing taxpayer" : "Copia: Obligado Tributario Emisor", 45, 686, { width: 522, align: "center" });
   pdf.text(language === "en" ? "Document issued through a Computerized Billing System - fixed independent SFC self-printer." : "Comprobante emitido mediante Sistema de Facturación Computarizado - Autoimpresor SFC independiente fijo.", 45, 702, { width: 522, align: "center" });
   pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(language === "en" ? "Thank you for choosing Bodegas Seguras Roatan." : company.legal_text || "Gracias por confiar en Bodegas Seguras Roatan.", 45, 722, { width: 522, align: "center" });
+  if (notesNeedAppendix) {
+    // El texto largo fluye completo, sin recortes ni cambios al resumen fiscal.
+    const drawNotesPage = () => {
+      pdf.rect(0, 0, 612, 8).fill(primaryColor);
+      pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(10).text(
+        `${document.document_type === "PROFORMA" ? words.proforma : words.invoice} ${document.document_number}`,
+        45, 28, { width: 522, align: "right" },
+      );
+      pdf.fontSize(8).text(notesTitle, 45, 52, { width: 522 });
+      pdf.fillColor("#334155").font("Helvetica").fontSize(8);
+      pdf.x = pdf.page.margins.left;
+      pdf.y = pdf.page.margins.top;
+    };
+    pdf.on("pageAdded", drawNotesPage);
+    try {
+      pdf.addPage({ size: "LETTER", margins: { top: 80, bottom: 45, left: 45, right: 45 } });
+      pdf.text(notes, 45, 80, { width: 522, lineGap: 2 });
+    } finally {
+      pdf.removeListener("pageAdded", drawNotesPage);
+    }
+  }
   pdf.end();
   return done;
 }
