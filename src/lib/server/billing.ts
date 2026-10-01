@@ -1,4 +1,3 @@
-
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -7,6 +6,7 @@ import PDFDocument from "pdfkit";
 import { getPool } from "@/lib/server/db";
 import { ensureIntegrationSchema } from "@/lib/server/integrations/schema";
 import { getUsdToHnlRate } from "@/lib/server/exchange-rate";
+import { calculateBillingAmounts } from "@/lib/billing-amounts";
 
 type LineInput = {
   catalogCode?: string;
@@ -372,7 +372,7 @@ export async function createBillingDocument(input: DocumentInput) {
     input.exoneratedRegistryNumber?.trim() ||
     input.sagRegistryNumber?.trim(),
   );
-  const items = input.items.map((line) => {
+  const sourceItems = input.items.map((line) => {
     const quantity = numeric(line.quantity);
     const unitPrice = numeric(line.unitPrice);
     const discountPercent = numeric(line.discountPercent);
@@ -380,20 +380,16 @@ export async function createBillingDocument(input: DocumentInput) {
     if (!line.description?.trim() || quantity <= 0 || unitPrice < 0 || discountPercent < 0 || discountPercent > 100 || taxRate < 0) {
       throw new Error("Revisa descripción, cantidad, precio, descuento e impuesto.");
     }
-    const gross = round(quantity * unitPrice);
-    const discount = round(gross * discountPercent / 100);
-    const subtotal = round(gross - discount);
-    const tax = round(subtotal * taxRate / 100);
-    return { ...line, quantity, unitPrice, discountPercent, taxRate, subtotal, discount, tax, total: round(subtotal + tax) };
+    return { ...line, quantity, unitPrice, discountPercent, taxRate };
   });
-  const subtotal = round(items.reduce((sum, item) => sum + item.subtotal, 0));
-  const discount = round(items.reduce((sum, item) => sum + item.discount, 0));
-  const tax = round(items.reduce((sum, item) => sum + item.tax, 0));
-  const total = round(items.reduce((sum, item) => sum + item.total, 0));
   const id = randomUUID();
   const prefix = input.documentType === "PROFORMA" ? "PRO" : "INV";
   let documentNumber = `${prefix}-${new Date().getFullYear()}-${randomUUID().slice(0, 8).toUpperCase()}`;
-  const currency = input.currency === "HNL" ? "HNL" : "USD";
+  const sourceCurrency = input.currency === "HNL" ? "HNL" : "USD";
+  // Fiscal invoices are stored in their actual billing currency, HNL.
+  // The price may be entered in USD, but ISV must be calculated after conversion.
+  // Proformas retain their chosen currency; existing documents are not migrated.
+  const currency = input.documentType === "INVOICE" ? "HNL" : sourceCurrency;
   // Resolver la venta BCH antes de consumir CAI; no confiar en la tasa de una pestaña antigua.
   let exchange = await getUsdToHnlRate();
   if (numeric(input.exchangeRate) > 0 && Math.abs(numeric(input.exchangeRate) - exchange.rate) > 0.000001) {
@@ -403,6 +399,15 @@ export async function createBillingDocument(input: DocumentInput) {
   if (input.source === "SERVICE" && Math.abs(numeric(input.exchangeRate) - exchange.rate) > 0.000001) {
     throw new Error("La tasa de venta se actualizó. Vuelve a generar la factura de servicios para revisar los totales con la tasa vigente.");
   }
+  if (input.documentType === "INVOICE" && numeric(input.exchangeRate) > 0
+      && Math.abs(numeric(input.exchangeRate) - exchange.rate) > 0.000001) {
+    throw new Error("La tasa de venta se actualizó. Revisa los totales en HNL y vuelve a generar la factura.");
+  }
+  const { items, subtotal, discount, tax, total } = calculateBillingAmounts(sourceItems, {
+    conversion: currency === "HNL" && sourceCurrency === "USD" ? exchange.rate : 1,
+    exempt: hasFiscalExemption,
+    groupTax: input.documentType === "INVOICE",
+  });
   const equivalentCurrency = currency === "USD" ? "HNL" : "USD";
   const equivalentTotal = round(currency === "USD" ? total * exchange.rate : total / exchange.rate);
   let fiscal: { cai: string; correlative: number; range: string; limitDate: string } | null = null;
@@ -539,7 +544,7 @@ export async function createBillingDocument(input: DocumentInput) {
       input.payment.reference,
     );
   }
-  return { id, documentNumber, status, total };
+  return { id, documentNumber, status, total, currency };
 }
 
 export async function updateBillingDocument(id: string, action: string, input: Record<string, unknown>) {
