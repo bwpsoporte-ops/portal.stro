@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StorageMapUnit, StorageUnitMap, storageCodes } from "@/components/storage-unit-map";
 import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
+import { calculateBillingAmounts } from "@/lib/billing-amounts";
 
 type Mode = "cash" | "proforma";
 type Customer = { id: string; storeganise_user_id: string; first_name: string | null; last_name: string | null; email: string | null; phone: string | null; address: string | null; billing_data: Record<string, unknown>; invoice_count: number };
@@ -116,12 +117,15 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
     [entry.first_name, entry.last_name, entry.email].filter(Boolean).join(" ").toLowerCase().includes(search.toLowerCase()),
   ).slice(0, 8);
   const hasFiscalExemption = Object.values(fiscalReferences).some((value) => value.trim().length > 0);
-  const totals = items.reduce((sum, item) => {
-    const gross = item.quantity * inputNumber(item.unitPrice);
-    const discounted = gross * (1 - item.discountPercent / 100);
-    return { subtotal: sum.subtotal + discounted, tax: sum.tax + discounted * (hasFiscalExemption ? 0 : item.taxRate) / 100 };
-  }, { subtotal: 0, tax: 0 });
-  const total = totals.subtotal + totals.tax;
+  const totalsCurrency = isProforma ? currency : "HNL";
+  const needsRate = !isProforma && currency === "USD";
+  const totalsReady = !needsRate || usdToHnl > 0;
+  const totals = calculateBillingAmounts(items.map((item) => ({ ...item, unitPrice: inputNumber(item.unitPrice) })), {
+    conversion: needsRate && usdToHnl > 0 ? usdToHnl : 1,
+    exempt: hasFiscalExemption,
+    groupTax: !isProforma,
+  });
+  const total = totals.total;
   const filteredDocuments = useMemo(() => documents.filter((document) =>
     [document.customer_name, document.customer_email, document.document_number].filter(Boolean).join(" ").toLowerCase().includes(historySearch.toLowerCase())
       && (historyStatus === "ALL" || document.status === historyStatus)
@@ -225,14 +229,10 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
           ...fiscalReferences,
           status: isProforma ? (status ?? "DRAFT") : "PENDING_PAYMENT", currency,
           exchangeRate: usdToHnl || undefined,
-          equivalentCurrency: currency === "USD" ? "HNL" : "USD",
-          equivalentTotal: usdToHnl
-            ? Number((currency === "USD" ? total * usdToHnl : total / usdToHnl).toFixed(2))
-            : undefined,
         }),
       });
       const data = await response.json(); if (!response.ok) throw new Error(data.message);
-      setMessage(`${isProforma ? "Proforma" : "Factura"} ${data.document.documentNumber} creada por ${money(Number(data.document.total), currency)}.`);
+      setMessage(`${isProforma ? "Proforma" : "Factura"} ${data.document.documentNumber} creada por ${money(Number(data.document.total), data.document.currency ?? totalsCurrency)}.`);
       setItems([blankItem()]); setNotes(""); setFiscalReferences({ exemptPurchaseOrder: "", exoneratedRegistryNumber: "", sagRegistryNumber: "" }); setSelectedUnits([]); await load();
     } catch (e) { setError(e instanceof Error ? e.message : "No se pudo guardar."); } finally { setSaving(false); }
   };
@@ -342,7 +342,7 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
                 </div>
               ))}
               <div className="ml-auto max-w-sm rounded-xl bg-slate-950 p-4 text-white">
-                <p className="flex justify-between text-sm"><span>Subtotal</span><strong>{money(totals.subtotal, currency)}</strong></p><p className="mt-2 flex justify-between text-sm"><span>Impuestos</span><strong>{money(totals.tax, currency)}</strong></p><p className="mt-3 flex justify-between border-t border-white/20 pt-3 text-xl font-black"><span>Total</span><span>{money(total, currency)}</span></p>
+                <p className="flex justify-between text-sm"><span>Subtotal</span><strong>{totalsReady ? money(totals.subtotal, totalsCurrency) : "Consultando tasa…"}</strong></p><p className="mt-2 flex justify-between text-sm"><span>Impuestos</span><strong>{totalsReady ? money(totals.tax, totalsCurrency) : "—"}</strong></p><p className="mt-3 flex justify-between border-t border-white/20 pt-3 text-xl font-black"><span>Total</span><span>{totalsReady ? money(total, totalsCurrency) : "—"}</span></p>
               </div>
               <textarea className="min-h-20 w-full rounded-lg border border-slate-200 p-3 text-sm" placeholder="Notas y condiciones" value={notes} onChange={(e) => setNotes(e.target.value)} />
               {!isProforma ? (
