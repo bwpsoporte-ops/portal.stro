@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { ActionButton, EmptyState, SelectInput, TextInput } from "@/components/ui";
+import { calculateBillingAmounts } from "@/lib/billing-amounts";
 
 type Customer = { id: string; storeganise_user_id: string; first_name: string | null; last_name: string | null; email: string | null; phone?: string | null; invoice_count: number };
 type Unit = { id: string; storeganise_user_id: string; unit_number: string; map_zone: string | null };
@@ -349,9 +350,15 @@ export default function PagosServiciosPage() {
   // Una sola fuente de verdad para los importes visibles y para la factura.
   // Electricidad: consumo manual × tarifa manual por kWh, más el margen.
   const totals = (() => {
-    const subtotal = roundMoney(selectedUnits.reduce((sum, id) => sum + unitTotal(id), 0));
-    const tax = roundMoney(subtotal * decimal(taxRate) / 100);
-    return { subtotal, tax, total: roundMoney(subtotal + tax) };
+    const conversion = usdToHnl > 0 ? usdToHnl : 1;
+    const fiscal = calculateBillingAmounts(selectedUnits.flatMap((id) =>
+      (assignments[id] ?? []).map((line) => ({
+        quantity: lineQuantity(line), unitPrice: lineUnitPrice(line),
+        discountPercent: 0, taxRate: decimal(taxRate),
+      }))), { conversion });
+    // Display controls accept USD references; the fiscal calculation is in HNL.
+    // Keep precision here so displaying HNL does not convert a rounded USD tax.
+    return { subtotal: fiscal.subtotal / conversion, tax: fiscal.tax / conversion, total: fiscal.total / conversion };
   })();
   const grandSubtotal = totals.subtotal;
   const grandTotal = totals.total;
@@ -373,6 +380,16 @@ export default function PagosServiciosPage() {
     event.preventDefault(); setSaving(true); setError(""); setMessage("");
     try {
       if (!selectedUnits.length) throw new Error("Selecciona al menos una bodega.");
+      const rateResponse = await fetch("/api/exchange-rate?refresh=1", { cache: "no-store" });
+      const latestExchange = await rateResponse.json();
+      if (!rateResponse.ok || !Number.isFinite(latestExchange.rate) || latestExchange.rate <= 0) {
+        throw new Error(latestExchange.message ?? "No se pudo actualizar la tasa de venta. Intenta nuevamente.");
+      }
+      setUsdToHnl(latestExchange.rate);
+      setExchangeUpdatedAt(latestExchange.updatedAt ?? null);
+      if (Math.abs(latestExchange.rate - usdToHnl) > 0.000001) {
+        throw new Error("Se actualizó la tasa de venta del BCH y se recalcularon los totales. Revisa los importes y vuelve a generar la factura.");
+      }
       const invoiceItemsUsd = selectedUnits.flatMap((id) => {
         const unit = mapUnits.find((entry) => entry.id === id)!; const assigned = assignments[id] ?? [];
         if (!assigned.length) throw new Error(`Agrega cargos para la bodega ${unit.unit_number}.`);
@@ -406,7 +423,6 @@ export default function PagosServiciosPage() {
       }
       const batchId = crypto.randomUUID();
       const unitNumbers = selectedUnits.map((id) => mapUnits.find((unit) => unit.id === id)?.unit_number).join(", ");
-      const equivalentTotal = roundMoney(grandTotal * usdToHnl);
       const response = await fetch("/api/billing", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -415,8 +431,6 @@ export default function PagosServiciosPage() {
           source: "SERVICE",
           currency: "USD",
           exchangeRate: usdToHnl,
-          equivalentCurrency: "HNL",
-          equivalentTotal,
           customerId: manual ? undefined : customerId,
           customer: manual ? manualCustomer : undefined,
           unitAssignments: selectedUnits.map((unitId) => {
@@ -424,7 +438,7 @@ export default function PagosServiciosPage() {
             return { unitId: unit.synthetic ? undefined : unit.id, unitLabel: unit.unit_number };
           }),
           items: invoiceItemsUsd,
-          notes: `Factura global bilingüe ${batchId}. Servicios período ${period}. Bodegas: ${unitNumbers}. Tasa: USD 1.00 = HNL ${usdToHnl.toFixed(4)}. Total equivalente: HNL ${equivalentTotal.toFixed(2)}.`,
+          notes: `Factura global bilingüe ${batchId}. Servicios período ${period}. Bodegas: ${unitNumbers}.`,
           payment: paymentState === "paid"
             ? { method: paymentMethod, reference: `SERVICIOS-${batchId}` }
             : undefined,
@@ -537,6 +551,6 @@ export default function PagosServiciosPage() {
       <section className="flex flex-col gap-4 rounded-2xl bg-slate-950 p-5 text-white md:flex-row md:items-end md:justify-between"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label className="text-xs font-black">Período<TextInput required type="month" value={period} onChange={(event) => setPeriod(event.target.value)} /></label><label className="text-xs font-black">Impuesto %<TextInput inputMode="decimal" placeholder="15" value={taxRate} onChange={(event) => setTaxRate(event.target.value)} /></label><label className="text-xs font-black">Estado final<select className="mt-1 w-full rounded-md bg-white px-3 py-2 text-sm text-slate-900" value={paymentState} onChange={(event) => setPaymentState(event.target.value as "pending" | "paid")}><option value="pending">Pendiente de pago</option><option value="paid">Confirmar pagado</option></select></label>{paymentState === "paid" ? <label className="text-xs font-black">Método<select className="mt-1 w-full rounded-md bg-white px-3 py-2 text-sm text-slate-900" value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as typeof paymentMethod)}><option value="cash">Caja</option><option value="transfer">Transferencia</option><option value="card">Tarjeta</option></select></label> : null}</div><div className="min-w-64 rounded-xl border border-sky-400/30 bg-white/10 p-4 text-right"><p className="text-xs font-black uppercase tracking-wider text-sky-300">Total global en vivo · {displayCurrency}</p><p className="text-4xl font-black text-white">{displayMoney(grandTotal)}</p><p className="mt-1 text-sm text-slate-300">Subtotal: <strong>{displayMoney(grandSubtotal)}</strong></p><p className="mb-3 text-sm text-slate-300">Impuesto: <strong>{displayMoney(grandTotal - grandSubtotal)}</strong></p><button disabled={!selectedUnits.length || saving} type="submit" className="rounded-md bg-sky-500 px-4 py-2 text-sm font-black text-white transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-40">{saving ? "Generando..." : "Generar factura global"}</button></div></section>
     </form>
     {message ? <p className="rounded-lg bg-emerald-50 p-4 font-bold text-emerald-700">{message}</p> : null}{error ? <p className="rounded-lg bg-rose-50 p-4 font-bold text-rose-700">{error}</p> : null}
-    <section className="rounded-lg border bg-white"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><h2 className="font-black">Facturas globales de servicios</h2><p className="text-xs text-slate-500">{filteredServiceDocuments.length} documento(s) · un correlativo por factura</p></div><SelectInput className="max-w-52" value={documentsPeriod} onChange={(event) => setDocumentsPeriod(event.target.value as PeriodFilter)}><option value="ALL">Todo el historial</option><option value="DAY">Hoy</option><option value="WEEK">Esta semana</option><option value="MONTH">Este mes</option></SelectInput></div>{!filteredServiceDocuments.length ? <div className="p-4"><EmptyState text="No hay facturas globales de servicios en este período." /></div> : <div className="overflow-auto"><table><thead><tr><th>Número</th><th>Cliente</th><th>Conceptos</th><th>Total</th><th>Estado</th><th>Representaciones</th></tr></thead><tbody>{filteredServiceDocuments.map((document) => <tr key={document.id}><td className="font-mono text-xs">{document.document_number}</td><td>{document.customer_name}</td><td>{document.items.map((item) => item.description).join(", ")}</td><td className="font-black">{documentMoney(Number(document.total), document.currency)}<br /><span className="text-xs text-slate-500">{document.equivalent_total ? documentMoney(Number(document.equivalent_total), "HNL") : null}</span></td><td>{document.status}</td><td><div className="flex min-w-max gap-2"><a href={`/api/billing/${document.id}/pdf?currency=USD&lang=en`} target="_blank" className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700">USD · English</a><a href={`/api/billing/${document.id}/pdf?currency=HNL&lang=es`} target="_blank" className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700">HNL · Español</a></div></td></tr>)}</tbody></table></div>}</section>
+    <section className="rounded-lg border bg-white"><div className="flex flex-wrap items-center justify-between gap-3 border-b p-4"><div><h2 className="font-black">Facturas globales de servicios</h2><p className="text-xs text-slate-500">{filteredServiceDocuments.length} documento(s) · un correlativo por factura</p></div><SelectInput className="max-w-52" value={documentsPeriod} onChange={(event) => setDocumentsPeriod(event.target.value as PeriodFilter)}><option value="ALL">Todo el historial</option><option value="DAY">Hoy</option><option value="WEEK">Esta semana</option><option value="MONTH">Este mes</option></SelectInput></div>{!filteredServiceDocuments.length ? <div className="p-4"><EmptyState text="No hay facturas globales de servicios en este período." /></div> : <div className="overflow-auto"><table><thead><tr><th>Número</th><th>Cliente</th><th>Conceptos</th><th>Total</th><th>Estado</th><th>Representaciones</th></tr></thead><tbody>{filteredServiceDocuments.map((document) => <tr key={document.id}><td className="font-mono text-xs">{document.document_number}</td><td>{document.customer_name}</td><td>{document.items.map((item) => item.description).join(", ")}</td><td className="font-black">{documentMoney(Number(document.total), document.currency)}<br /><span className="text-xs text-slate-500">{document.equivalent_total && document.equivalent_currency ? documentMoney(Number(document.equivalent_total), document.equivalent_currency) : null}</span></td><td>{document.status}</td><td><div className="flex min-w-max gap-2"><a href={`/api/billing/${document.id}/pdf?currency=USD&lang=en`} target="_blank" className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700">USD · English</a><a href={`/api/billing/${document.id}/pdf?currency=HNL&lang=es`} target="_blank" className="rounded-md border border-sky-200 px-3 py-2 text-xs font-black text-sky-700">HNL · Español</a></div></td></tr>)}</tbody></table></div>}</section>
   </div></>;
 }
