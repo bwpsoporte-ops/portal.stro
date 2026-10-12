@@ -35,7 +35,14 @@ export async function getAccountingReport(filters: AccountingFilters = {}) {
   const db = getPool();
   const [invoiceResult, paymentResult, rangeResult, noteResult, companyResult] = await Promise.all([
     db.query(`SELECT d.id,d.document_number,d.source,d.customer_name,d.customer_email,d.customer_rtn,d.unit_label,d.currency,d.exchange_rate,d.equivalent_total,d.subtotal,d.discount,d.tax,d.total,d.amount_paid,d.credited_amount,d.status,d.cai,d.fiscal_correlative,d.sent_at,d.created_at FROM billing_documents d WHERE d.document_type='INVOICE' ORDER BY d.created_at DESC LIMIT 5000`),
-    db.query(`SELECT p.id,p.document_id,p.amount,p.method,p.reference,p.notes,p.paid_at,d.document_number,d.customer_name,d.currency,d.exchange_rate,d.total,d.equivalent_total FROM billing_payments p JOIN billing_documents d ON d.id=p.document_id ORDER BY p.paid_at DESC LIMIT 5000`),
+    db.query(`SELECT p.id,p.document_id,p.amount,p.method,p.reference,p.notes,p.paid_at,
+        d.document_number,d.customer_name,d.currency,d.exchange_rate,d.total,d.equivalent_total
+      FROM (
+        SELECT id,document_id,amount,method,reference,notes,paid_at FROM billing_payments
+        UNION ALL
+        SELECT id,document_id,amount,method,reference,notes,paid_at FROM storeganise_billing_receipts
+      ) p JOIN billing_documents d ON d.id=p.document_id
+      WHERE d.document_type='INVOICE' ORDER BY p.paid_at DESC LIMIT 5000`),
     db.query(`SELECT id,cai,range_start,range_end,current_number,expiration_date::text AS expiration_date,authorization_date::text AS authorization_date,status::text AS status,document_type,establishment,emission_point,branch,created_at,GREATEST(range_end-current_number+1,0)::integer AS available,GREATEST(current_number-range_start,0)::integer AS used FROM cai_ranges ORDER BY created_at DESC`),
     db.query(`SELECT id,credit_note_number,invoice_number,customer_name,customer_rtn,customer_email,currency,total,status,created_at FROM credit_notes ORDER BY created_at DESC LIMIT 2000`),
     db.query(`SELECT trade_name,legal_name,rtn,address,head_office_address,establishment_address,phone,email FROM invoice_templates WHERE is_active=true ORDER BY updated_at DESC LIMIT 1`),
