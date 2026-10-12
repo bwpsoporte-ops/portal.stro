@@ -225,6 +225,37 @@ async function createSchema() {
     ALTER TABLE integration_invoices
       ADD COLUMN IF NOT EXISTS billing_document_id text REFERENCES billing_documents(id) ON DELETE SET NULL;
     ALTER TABLE integration_invoices ADD COLUMN IF NOT EXISTS origin_job_id text;
+    -- NULL means a legacy invoice, not a deposit that has been separated.
+    ALTER TABLE integration_invoices ADD COLUMN IF NOT EXISTS portal_rental_amount numeric(14,2);
+    ALTER TABLE integration_invoices ADD COLUMN IF NOT EXISTS portal_deposit_amount numeric(14,2);
+    ALTER TABLE integration_invoices ADD COLUMN IF NOT EXISTS portal_deposit_rental_id text;
+    -- Only INSERTs from the new flow opt in; never backfill historical charges.
+    ALTER TABLE integration_invoices ADD COLUMN IF NOT EXISTS portal_billing_version integer;
+
+    CREATE TABLE IF NOT EXISTS integration_rental_deposits (
+      storeganise_rental_id text PRIMARY KEY,
+      storeganise_user_id text NOT NULL,
+      storeganise_invoice_id text NOT NULL UNIQUE,
+      proforma_id text NOT NULL UNIQUE REFERENCES billing_documents(id) ON DELETE RESTRICT,
+      amount numeric(14,2) NOT NULL CHECK (amount > 0),
+      currency text NOT NULL CHECK (currency IN ('USD','HNL')),
+      raw_payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS storeganise_billing_receipts (
+      id text PRIMARY KEY,
+      document_id text NOT NULL UNIQUE REFERENCES billing_documents(id) ON DELETE RESTRICT,
+      storeganise_invoice_id text NOT NULL,
+      amount numeric(14,2) NOT NULL CHECK (amount > 0),
+      currency text NOT NULL CHECK (currency IN ('USD','HNL')),
+      method text NOT NULL,
+      reference text NOT NULL,
+      notes text NOT NULL,
+      paid_at timestamptz NOT NULL DEFAULT now(),
+      raw_payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
 
     CREATE TABLE IF NOT EXISTS credit_notes (
       id text PRIMARY KEY,
