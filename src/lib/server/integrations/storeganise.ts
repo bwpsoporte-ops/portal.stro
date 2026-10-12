@@ -1,8 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
 import { getPool } from "@/lib/server/db";
 import { createBillingDocument } from "@/lib/server/billing";
-import { getUsdToHnlRate } from "@/lib/server/exchange-rate";
 import { ensureIntegrationSchema } from "./schema";
+import {
+  splitStoreganiseDeposit,
+  storeganisePaymentConfirmed,
+  storeganisePaymentDetails,
+  storeganiseRentalId,
+} from "./storeganise-deposit";
 import {
   fetchStoreganiseInvoice,
   fetchStoreganiseJob,
@@ -308,7 +314,7 @@ async function syncInvoiceCustomer(invoice: JsonObject, payload: JsonObject, api
   const userId = idFrom(invoice, "userId", "user_id", "customerId", "ownerId")
     ?? idFrom(embedded, "id", "_id", "userId");
   if (!userId) return;
-  const completeUser = await fetchStoreganiseUser(userId, apiUrl).catch(() => ({}));
+  const completeUser = await fetchStoreganiseUser(userId, apiUrl);
   const user = { ...embedded, ...completeUser, userId };
   await upsertCustomer("user.updated", user, payload);
 }
@@ -399,37 +405,8 @@ async function upsertCustomer(eventType: string, data: JsonObject, payload: Json
     ],
   );
 
-  await refreshPendingInvoiceCustomer(userId);
-}
-
-async function refreshPendingInvoiceCustomer(storeganiseUserId: string) {
-  await getPool().query(
-    `UPDATE billing_documents AS document
-     SET customer_name=COALESCE(NULLIF(TRIM(CONCAT_WS(' ',customer.first_name,customer.last_name)),''),document.customer_name),
-         customer_email=COALESCE(customer.email,document.customer_email),
-         customer_phone=COALESCE(customer.phone,document.customer_phone),
-         customer_rtn=COALESCE(NULLIF(customer.billing_data->>'rtn',''),document.customer_rtn),
-         customer_address=COALESCE(customer.address,document.customer_address),
-         customer_company_name=COALESCE(customer.company_name,document.customer_company_name),
-         customer_legal_name=COALESCE(customer.legal_company_name,document.customer_legal_name),
-         customer_country=COALESCE(customer.country,document.customer_country),
-         customer_language=COALESCE(customer.language,document.customer_language),
-         customer_cc_emails=COALESCE(customer.cc_emails,document.customer_cc_emails),
-         customer_storage_use=COALESCE(customer.storage_use,document.customer_storage_use),
-         customer_planned_storage=COALESCE(customer.planned_storage,document.customer_planned_storage),
-         customer_custom_fields=CASE
-           WHEN customer.custom_fields='{}'::jsonb THEN document.customer_custom_fields
-           ELSE customer.custom_fields
-         END,
-         updated_at=now()
-     FROM integration_customers AS customer
-     WHERE customer.storeganise_user_id=$1
-       AND document.customer_id=customer.id
-       AND document.document_type='INVOICE'
-       AND document.status IN ('PENDING_PAYMENT','PARTIALLY_PAID')
-       AND document.sent_at IS NULL`,
-    [storeganiseUserId],
-  );
+  // Customer updates are for future documents. Issued invoices/proformas retain
+  // their original customer snapshot, including pending and unsent invoices.
 }
 
 async function upsertInvoice(eventType: string, data: JsonObject, payload: JsonObject) {
@@ -438,15 +415,31 @@ async function upsertInvoice(eventType: string, data: JsonObject, payload: JsonO
   const user = object(data.user ?? data.customer ?? data.owner);
   const userId = idFrom(data, "userId", "user_id", "customerId", "ownerId") ?? idFrom(user, "id", "_id");
   const statusValue = first(data, "state", "status", "paymentState");
-  const total = first(data, "amount", "total", "amountDue", "balance", "grandTotal");
+  // A settled invoice has balance=0; its original total is still the amount to split.
+  const total = first(data, "total", "grandTotal", "amount", "amountDue", "balance");
   const currencyValue = first(data, "currency", "currencyCode");
   const currency = text(first(object(currencyValue), "code")) ?? text(currencyValue) ?? "USD";
   const originJobId = idFrom(data, "jobId", "job_id")
     ?? nestedId(data, ["jobId", "job_id"]);
+  const rentalId = storeganiseRentalId(data);
+  if (eventType !== "invoice.deleted") {
+    let unit = object(data.unit);
+    let unitId = idFrom(data, "unitId", "unit_id") ?? idFrom(unit, "id", "_id");
+    if (!unitId && rentalId) {
+      const rental = await fetchStoreganiseUnitRental(rentalId, payload.apiUrl);
+      unit = object(rental.unit);
+      unitId = idFrom(rental, "unitId", "unit_id") ?? idFrom(unit, "id", "_id");
+    }
+    if (unitId) {
+      const completeUnit = { ...await fetchStoreganiseUnit(unitId, payload.apiUrl), ...unit, unitId };
+      data.unitId = unitId;
+      data.unit = completeUnit;
+    }
+  }
   await getPool().query(
     `INSERT INTO integration_invoices
-      (id,storeganise_invoice_id,storeganise_user_id,amount,currency,storeganise_status,raw_payload,deleted,origin_job_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$12)
+      (id,storeganise_invoice_id,storeganise_user_id,amount,currency,storeganise_status,raw_payload,deleted,origin_job_id,portal_billing_version)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$12,1)
      ON CONFLICT (storeganise_invoice_id) DO UPDATE SET
        storeganise_user_id=COALESCE(EXCLUDED.storeganise_user_id,integration_invoices.storeganise_user_id),
        amount=CASE WHEN $9 THEN EXCLUDED.amount ELSE integration_invoices.amount END,
@@ -473,9 +466,7 @@ async function ensurePortalInvoiceFromJob(
 ) {
   const total = amountFromResource(job);
   if (total <= 0) {
-    throw new Error(
-      `El trabajo ${jobId} fue recibido, pero Storeganise todavía no proporciona un monto facturable. Reprocesa el evento cuando el ingreso esté confirmado.`,
-    );
+    return { waitingForInvoice: true };
   }
   const embeddedUser = object(job.user ?? job.customer ?? job.owner);
   const userId = idFrom(job, "userId", "user_id", "customerId", "ownerId")
@@ -497,7 +488,9 @@ async function ensurePortalInvoiceFromJob(
       JSON.stringify(snapshot(payload, job)), jobId,
     ],
   );
-  return ensurePortalInvoice(externalInvoiceId, job);
+  // A move-in job's aggregate price does not identify which amount is a deposit.
+  // Keep it synchronized, but wait for the real invoice and its typed entries.
+  return { waitingForInvoice: true };
 }
 
 async function syncInvoiceFromResource(
@@ -523,6 +516,7 @@ async function syncInvoiceFromResource(
     ?? nestedId(resource, ["userId", "user_id", "customerId", "ownerId"]);
   const invoice = {
     ...embeddedInvoice,
+    ...(storeganiseRentalId(resource) ? { unitRentalId: storeganiseRentalId(resource) } : {}),
     ...fetchedInvoice,
     invoiceId,
     ...(userId ? { userId } : {}),
@@ -555,6 +549,32 @@ function billingPeriod(data: JsonObject) {
   return new Intl.DateTimeFormat("es-HN", { month: "long", year: "numeric", timeZone: "UTC" }).format(valid);
 }
 
+// Called only with documents just created in this same transaction. Never
+// updates an existing invoice/proforma or invents the gateway's payment method.
+async function recordNewStoreganiseReceipt(
+  client: PoolClient,
+  document: { id: string; total: number; currency: string },
+  storeganiseInvoiceId: string,
+  resource: JsonObject,
+) {
+  const payment = storeganisePaymentDetails(resource, storeganiseInvoiceId);
+  await client.query(
+    `INSERT INTO storeganise_billing_receipts
+      (id,document_id,storeganise_invoice_id,amount,currency,method,reference,notes,paid_at,raw_payload)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9::timestamptz,now()),$10::jsonb)`,
+    [randomUUID(), document.id, storeganiseInvoiceId, document.total, document.currency,
+      payment.method, payment.reference,
+      "Pago confirmado por Storeganise. Importe asignado exclusivamente a este documento.",
+      payment.paidAt, JSON.stringify(resource)],
+  );
+  await client.query(
+    `UPDATE billing_documents SET amount_paid=total,
+       status=CASE WHEN document_type='INVOICE' THEN 'PAID' ELSE 'ACCEPTED' END,
+       paid_at=COALESCE($2::timestamptz,now()) WHERE id=$1`,
+    [document.id, payment.paidAt],
+  );
+}
+
 async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonObject) {
   const lockClient = await getPool().connect();
   const note = `Storeganise invoice: ${storeganiseInvoiceId}`;
@@ -570,26 +590,36 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
       unit_number: string | null;
       storeganise_user_id: string | null;
       origin_job_id: string | null;
+      portal_rental_amount: string | null;
+      portal_deposit_amount: string | null;
+      portal_deposit_rental_id: string | null;
+      portal_billing_version: number | null;
     }>(
       `SELECT i.billing_document_id,i.amount::text,i.currency,i.storeganise_user_id,
-              i.origin_job_id,c.id AS customer_id,
+              i.origin_job_id,i.portal_rental_amount,i.portal_deposit_amount,
+              i.portal_deposit_rental_id,i.portal_billing_version,c.id AS customer_id,
               u.id AS unit_id,u.unit_number
        FROM integration_invoices i
        LEFT JOIN integration_customers c ON c.storeganise_user_id=i.storeganise_user_id AND c.disabled=false
        LEFT JOIN LATERAL (
          SELECT id,unit_number FROM customer_units
          WHERE storeganise_user_id=i.storeganise_user_id AND status='ACTIVE'
+           AND (($2::text IS NOT NULL AND storeganise_unit_id=$2)
+             OR ($2::text IS NULL AND (SELECT count(*) FROM customer_units cu
+                 WHERE cu.storeganise_user_id=i.storeganise_user_id AND cu.status='ACTIVE')=1))
          ORDER BY updated_at DESC LIMIT 1
        ) u ON true
        WHERE i.storeganise_invoice_id=$1 AND i.deleted=false
        FOR UPDATE OF i`,
-      [storeganiseInvoiceId],
+      [storeganiseInvoiceId, idFrom(resource, "unitId", "unit_id")],
     );
     if (!linked.rowCount) throw new Error("La factura sincronizada no está disponible para crear el documento fiscal.");
     const row = linked.rows[0];
-    if (row.billing_document_id) {
+    // Existing fiscal invoices are immutable here. A legacy invoice may already
+    // include the deposit; creating a proforma for it would double-count it.
+    if (row.portal_billing_version !== 1 || row.billing_document_id || row.portal_deposit_amount !== null) {
       await lockClient.query("COMMIT");
-      return { id: row.billing_document_id, duplicate: true };
+      return { id: row.billing_document_id, duplicate: true, legacy: row.portal_billing_version !== 1 };
     }
 
     const jobDocument = await lockClient.query<{ id: string; billing_document_id: string }>(
@@ -598,30 +628,23 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
        WHERE storeganise_invoice_id<>$1
          AND billing_document_id IS NOT NULL
          AND storeganise_invoice_id LIKE 'JOB:%'
-         AND (
-           ($2::text IS NOT NULL AND origin_job_id=$2)
-           OR ($3::text IS NOT NULL AND storeganise_user_id=$3 AND created_at>=now()-INTERVAL '2 days')
-         )
+         AND $2::text IS NOT NULL AND origin_job_id=$2
        ORDER BY created_at DESC LIMIT 1`,
-      [storeganiseInvoiceId, row.origin_job_id, row.storeganise_user_id],
+      [storeganiseInvoiceId, row.origin_job_id],
     );
-    if (jobDocument.rowCount) {
+    if (!row.billing_document_id && row.portal_deposit_amount === null && jobDocument.rowCount) {
       await lockClient.query(
         `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
         [storeganiseInvoiceId, jobDocument.rows[0].billing_document_id],
-      );
-      await lockClient.query(
-        `UPDATE integration_invoices SET deleted=true,updated_at=now() WHERE id=$1`,
-        [jobDocument.rows[0].id],
       );
       await lockClient.query("COMMIT");
       return { id: jobDocument.rows[0].billing_document_id, reconciled: true };
     }
 
     const recovered = await lockClient.query<{ id: string }>(
-      `SELECT id FROM billing_documents WHERE notes=$1 LIMIT 1`, [note],
+      `SELECT id FROM billing_documents WHERE notes=$1 AND document_type='INVOICE' LIMIT 1`, [note],
     );
-    if (recovered.rowCount) {
+    if (!row.billing_document_id && row.portal_deposit_amount === null && recovered.rowCount) {
       await lockClient.query(
         `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
         [storeganiseInvoiceId, recovered.rows[0].id],
@@ -630,47 +653,116 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
       return { id: recovered.rows[0].id, recovered: true };
     }
 
-    if (!row.customer_id) throw new Error("La factura de Storeganise todavía no tiene un cliente sincronizado.");
     const total = amount(row.amount);
-    if (total <= 0) throw new Error("El total recibido desde Storeganise debe ser mayor que cero.");
+    // All callers (invoice, rental, unit and move-in events) share this gate.
+    // Reservations, drafts, partial payments and zero balances without an actual
+    // payment never issue documents or consume a fiscal correlative.
+    if (!storeganisePaymentConfirmed(resource, total)) {
+      await lockClient.query("COMMIT");
+      return { waitingForPayment: true };
+    }
+    if (!row.customer_id) throw new Error("La factura de Storeganise todavía no tiene un cliente sincronizado.");
+    if (roundMoney(amount(first(resource, "total", "grandTotal", "amount"))) !== roundMoney(total)) {
+      throw new Error("Llegó una actualización concurrente del cobro. Reintenta el evento para leer su importe vigente.");
+    }
+    const split = splitStoreganiseDeposit(resource, total);
     const configuredTax = Number(process.env.STOREGANISE_TAX_RATE ?? 15);
     const taxRate = Number.isFinite(configuredTax) && configuredTax >= 0 ? configuredTax : 15;
-    const net = taxInclusiveNet(total, taxRate);
+    const net = taxInclusiveNet(split.rentalTotal, taxRate);
     const unitLabel = row.unit_number?.trim() || "";
     const period = billingPeriod(resource);
     const description = unitLabel
       ? `Bodega ${unitLabel} · Alquiler por 30 días · ${period}`
       : `Alquiler de bodega · ${period}`;
     const sourceCurrency = row.currency.toUpperCase() === "HNL" ? "HNL" : "USD";
-    const exchange = sourceCurrency === "USD" ? await getUsdToHnlRate() : null;
-    const equivalentTotal = exchange ? roundMoney(total * exchange.rate) : total;
-    const created = await createBillingDocument({
-      documentType: "INVOICE",
-      source: "CASH",
-      customerId: row.customer_id,
-      unitId: row.unit_id ?? undefined,
-      unitLabel: unitLabel || undefined,
-      items: [{
-        catalogCode: unitLabel ? "RENTAL_30_DAYS" : "STOREGANISE_RENTAL",
-        description,
-        quantity: 1,
-        unitPrice: net,
-        discountPercent: 0,
-        taxRate,
-      }],
-      notes: note,
-      status: "PENDING_PAYMENT",
-      currency: sourceCurrency,
-      exchangeRate: exchange?.rate,
-      equivalentCurrency: sourceCurrency === "USD" ? "HNL" : "USD",
-      equivalentTotal,
-    });
+    let proformaId: string | null = null;
+    if (split.depositTotal > 0 && split.rentalId) {
+      if (!row.storeganise_user_id || !row.unit_id || !idFrom(resource, "unitId", "unit_id")) {
+        throw new Error("El depósito necesita un cliente y la bodega exacta del alquiler sincronizados.");
+      }
+      await lockClient.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`deposit:${split.rentalId}`]);
+      const previous = await lockClient.query<{
+        proforma_id: string; storeganise_invoice_id: string; storeganise_user_id: string;
+        amount: string; currency: string;
+      }>(`SELECT proforma_id,storeganise_invoice_id,storeganise_user_id,amount,currency
+          FROM integration_rental_deposits WHERE storeganise_rental_id=$1 FOR UPDATE`, [split.rentalId]);
+      if (previous.rowCount) {
+        const deposit = previous.rows[0];
+        if (deposit.storeganise_invoice_id !== storeganiseInvoiceId
+          || deposit.storeganise_user_id !== row.storeganise_user_id
+          || amount(deposit.amount) !== split.depositTotal || deposit.currency !== sourceCurrency) {
+          throw new Error("Este alquiler ya tiene una proforma de depósito vinculada a otro cobro o importe. Revisa el depósito; no se duplicará.");
+        }
+        proformaId = deposit.proforma_id;
+      } else {
+        const proforma = await createBillingDocument({
+          documentType: "PROFORMA",
+          source: "MANUAL",
+          customerId: row.customer_id,
+          unitId: row.unit_id,
+          unitLabel,
+          items: [{
+            catalogCode: "STOREGANISE_SECURITY_DEPOSIT",
+            description: `Bodega ${unitLabel} · Depósito en garantía`,
+            quantity: 1,
+            unitPrice: split.depositTotal,
+            discountPercent: 0,
+            taxRate: 0,
+          }],
+          notes: `Depósito recibido y confirmado por Storeganise. Alquiler: ${split.rentalId}. Cobro de origen: ${storeganiseInvoiceId}. Separado de la factura del alquiler.`,
+          status: "ACCEPTED",
+          currency: sourceCurrency,
+        }, lockClient);
+        proformaId = proforma.id;
+        await recordNewStoreganiseReceipt(lockClient, proforma, storeganiseInvoiceId, resource);
+        await lockClient.query(
+          `INSERT INTO integration_rental_deposits
+            (storeganise_rental_id,storeganise_user_id,storeganise_invoice_id,proforma_id,amount,currency,raw_payload)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+          [split.rentalId, row.storeganise_user_id, storeganiseInvoiceId, proformaId, split.depositTotal,
+            sourceCurrency, JSON.stringify({ entries: split.deposits, amountPaid: resource.amountPaid,
+              balance: resource.balance, state: resource.state ?? resource.status, payments: resource.payments })],
+        );
+      }
+    }
+
+    // A deposit-only charge must not consume a fiscal correlative.
+    let invoiceId = row.billing_document_id;
+    let created = false;
+    if (!invoiceId && split.rentalTotal > 0) {
+      const invoice = await createBillingDocument({
+        documentType: "INVOICE",
+        source: "CASH",
+        customerId: row.customer_id,
+        unitId: row.unit_id ?? undefined,
+        unitLabel: unitLabel || undefined,
+        items: [{
+          catalogCode: unitLabel ? "RENTAL_30_DAYS" : "STOREGANISE_RENTAL",
+          description,
+          quantity: 1,
+          unitPrice: net,
+          discountPercent: 0,
+          taxRate,
+        }],
+        notes: note,
+        status: "PAID",
+        currency: sourceCurrency,
+      }, lockClient);
+      await recordNewStoreganiseReceipt(lockClient, invoice, storeganiseInvoiceId, resource);
+      invoiceId = invoice.id;
+      created = true;
+    }
+    const payment = storeganisePaymentDetails(resource, storeganiseInvoiceId);
     await lockClient.query(
-      `UPDATE integration_invoices SET billing_document_id=$2,updated_at=now() WHERE storeganise_invoice_id=$1`,
-      [storeganiseInvoiceId, created.id],
+      `UPDATE integration_invoices SET billing_document_id=$2,portal_rental_amount=$3,
+        portal_deposit_amount=$4,portal_deposit_rental_id=$5,payment_status='APPROVED',
+        payment_method=$6,payment_id=$7,paid_at=COALESCE($8::timestamptz,now()),updated_at=now()
+       WHERE storeganise_invoice_id=$1`,
+      [storeganiseInvoiceId, invoiceId, split.rentalTotal, split.depositTotal, split.rentalId,
+        payment.method, payment.reference, payment.paidAt],
     );
     await lockClient.query("COMMIT");
-    return { id: created.id, created: true };
+    return { id: invoiceId, created, proformaId, depositPendingPayment: split.depositTotal > 0 && !proformaId };
   } catch (error) {
     await lockClient.query("ROLLBACK");
     throw error;
