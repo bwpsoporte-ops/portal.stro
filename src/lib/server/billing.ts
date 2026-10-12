@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import nodemailer from "nodemailer";
 import PDFDocument from "pdfkit";
+import type { PoolClient } from "pg";
 import { getPool } from "@/lib/server/db";
 import { ensureIntegrationSchema } from "@/lib/server/integrations/schema";
 import { getUsdToHnlRate } from "@/lib/server/exchange-rate";
@@ -313,12 +314,15 @@ export async function resetTestBilling(confirmText: string) {
   }
 }
 
-export async function createBillingDocument(input: DocumentInput) {
+// A supplied transaction owns COMMIT/ROLLBACK. This lets an integration save
+// its document and deduplication record atomically, without changing manual Caja.
+export async function createBillingDocument(input: DocumentInput, transaction?: PoolClient) {
   await ensureIntegrationSchema();
+  if (transaction && input.payment) throw new Error("Registra el pago dentro de la transacción de la integración.");
   if (!["PROFORMA", "INVOICE"].includes(String(input.documentType))) throw new Error("Tipo de documento inválido.");
   if (!input.items?.length) throw new Error("Agrega al menos un producto o servicio.");
 
-  const db = getPool();
+  const db = transaction ?? getPool();
   let customer = input.customer;
   if (input.customerId) {
     const result = await db.query<{
@@ -413,9 +417,9 @@ export async function createBillingDocument(input: DocumentInput) {
   let fiscal: { cai: string; correlative: number; range: string; limitDate: string } | null = null;
   const status = input.status || (input.documentType === "PROFORMA" ? "DRAFT" : "PENDING_PAYMENT");
 
-  const client = await db.connect();
+  const client = transaction ?? await getPool().connect();
   try {
-    await client.query("BEGIN");
+    if (!transaction) await client.query("BEGIN");
     if (input.documentType === "INVOICE") {
       const cai = await client.query<{
         id: string; cai: string; range_start: number; range_end: number; current_number: number;
@@ -525,12 +529,12 @@ export async function createBillingDocument(input: DocumentInput) {
         );
       }
     }
-    await client.query("COMMIT");
+    if (!transaction) await client.query("COMMIT");
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (!transaction) await client.query("ROLLBACK");
     throw error;
   } finally {
-    client.release();
+    if (!transaction) client.release();
   }
 
   if (input.payment) {
@@ -693,8 +697,14 @@ export async function getDocument(id: string) {
     `SELECT d.*,COALESCE(
       (SELECT string_agg(bdu.unit_label,', ' ORDER BY bdu.unit_label) FROM billing_document_units bdu WHERE bdu.document_id=d.id),
       u.unit_number,d.unit_label) AS unit_number,u.map_zone,
-      (SELECT bp.method FROM billing_payments bp WHERE bp.document_id=d.id ORDER BY bp.paid_at DESC LIMIT 1) AS payment_method,
-      (SELECT bp.reference FROM billing_payments bp WHERE bp.document_id=d.id ORDER BY bp.paid_at DESC LIMIT 1) AS payment_reference,
+      COALESCE(
+        (SELECT bp.method FROM billing_payments bp WHERE bp.document_id=d.id ORDER BY bp.paid_at DESC LIMIT 1),
+        (SELECT sr.method FROM storeganise_billing_receipts sr WHERE sr.document_id=d.id)
+      ) AS payment_method,
+      COALESCE(
+        (SELECT bp.reference FROM billing_payments bp WHERE bp.document_id=d.id ORDER BY bp.paid_at DESC LIMIT 1),
+        (SELECT sr.reference FROM storeganise_billing_receipts sr WHERE sr.document_id=d.id)
+      ) AS payment_reference,
       (SELECT max(so.next_due_date)::text FROM storage_occupancies so WHERE so.last_invoice_id=d.id) AS due_date,
       COALESCE(json_agg(json_build_object(
         'catalogCode',di.catalog_code,'description',di.description,'quantity',di.quantity,
