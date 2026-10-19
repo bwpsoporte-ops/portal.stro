@@ -345,11 +345,10 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
                 <p className="flex justify-between text-sm"><span>Subtotal</span><strong>{totalsReady ? money(totals.subtotal, totalsCurrency) : "Consultando tasa…"}</strong></p><p className="mt-2 flex justify-between text-sm"><span>Impuestos</span><strong>{totalsReady ? money(totals.tax, totalsCurrency) : "—"}</strong></p><p className="mt-3 flex justify-between border-t border-white/20 pt-3 text-xl font-black"><span>Total</span><span>{totalsReady ? money(total, totalsCurrency) : "—"}</span></p>
               </div>
               <textarea className="min-h-20 w-full rounded-lg border border-slate-200 p-3 text-sm" placeholder="Notas y condiciones" value={notes} onChange={(e) => setNotes(e.target.value)} />
-              {!isProforma ? (
                 <section className="rounded-xl border border-amber-200 bg-amber-50 p-4">
                   <div>
                     <h3 className="text-sm font-black text-amber-950">Referencias de exención o exoneración</h3>
-                    <p className="mt-1 text-xs text-amber-800">Déjalas vacías para cobrar el ISV normalmente. Al ingresar cualquiera, la factura se emitirá sin ISV y conservará el código en el PDF.</p>
+                    <p className="mt-1 text-xs text-amber-800">Déjalas vacías para cobrar el ISV normalmente. Al ingresar cualquiera, la {isProforma ? "proforma" : "factura"} se emitirá sin ISV y conservará el código en el PDF.</p>
                   </div>
                   <div className="mt-3 grid gap-3">
                     <label className="text-xs font-black text-slate-700">
@@ -387,10 +386,9 @@ export function BillingWorkbench({ mode }: { mode: Mode }) {
                     </label>
                   </div>
                   {hasFiscalExemption ? (
-                    <div className="mt-3 rounded-lg bg-emerald-100 p-3 text-xs font-black text-emerald-900">Exención activa: ISV 0%. El código quedará registrado en la factura.</div>
+                    <div className="mt-3 rounded-lg bg-emerald-100 p-3 text-xs font-black text-emerald-900">Exención activa: ISV 0%. El código quedará registrado en la {isProforma ? "proforma" : "factura"}.</div>
                   ) : null}
                 </section>
-              ) : null}
               <div className="flex flex-wrap justify-end gap-2">{isProforma ? <><ActionButton variant="secondary" type="submit">{saving ? "Guardando..." : "Guardar borrador"}</ActionButton><ActionButton onClick={() => { const form = document.querySelector("form"); if (form) void submit({ preventDefault: () => {} } as FormEvent, "SENT"); }}>Guardar como enviada</ActionButton></> : <ActionButton type="submit">{saving ? "Facturando..." : "Crear factura"}</ActionButton>}</div>
             </section>
           </div>
