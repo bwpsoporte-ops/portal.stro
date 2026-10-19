@@ -123,13 +123,17 @@ const numeric = (value: unknown) => {
 
 const formatDocumentDate = (value: Date | string | null, language: "es" | "en") => {
   if (!value) return "-";
-  const iso = String(value).slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-    const [year, month, day] = iso.split("-");
+  // Calendar dates (e.g. a CAI deadline) must not shift time zones. Creation
+  // timestamps, however, must be displayed in Honduras, not in the server's TZ.
+  const dateOnly = typeof value === "string" ? value.trim() : "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
+    const [year, month, day] = dateOnly.split("-");
     return language === "en" ? `${month}/${day}/${year}` : `${day}/${month}/${year}`;
   }
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "-" : new Intl.DateTimeFormat(language === "en" ? "en-US" : "es-HN", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+  return Number.isNaN(date.getTime()) ? "-" : new Intl.DateTimeFormat(language === "en" ? "en-US" : "es-HN", {
+    day: "2-digit", month: "2-digit", year: "numeric", timeZone: "America/Tegucigalpa",
+  }).format(date);
 };
 
 const spanishIntegerWords = (value: number): string => {
@@ -649,6 +653,9 @@ export async function updateBillingDocument(id: string, action: string, input: R
       })),
       notes: source.notes ?? undefined,
       currency: source.currency === "HNL" ? "HNL" : "USD",
+      exemptPurchaseOrder: source.exempt_purchase_order ?? undefined,
+      exoneratedRegistryNumber: source.exonerated_registry_number ?? undefined,
+      sagRegistryNumber: source.sag_registry_number ?? undefined,
     });
     await getPool().query(`UPDATE billing_documents SET status='CONVERTED',converted_invoice_id=$2,updated_at=now() WHERE id=$1`, [id, created.id]);
     return created;
@@ -881,6 +888,14 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
     pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(8).text(language === "en" ? "PROFORMA DETAILS" : "DATOS DE LA PROFORMA", 310, 149, { width: 245, align: "right" });
     pdf.fillColor("#334155").font("Helvetica").fontSize(7).text(language === "en" ? "Non-fiscal quotation. Does not consume CAI or correlative." : "Cotización no fiscal. No consume CAI ni correlativo.", 310, 165, { width: 245, align: "right" });
     pdf.text(document.unit_number ? `${words.unit}: ${document.unit_number}` : words.globalUnits, 310, 184, { width: 245, align: "right" });
+    pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(7).text(
+      language === "en" ? "EXEMPTION REFERENCES" : "REFERENCIAS DE EXENCIÓN O EXONERACIÓN",
+      310, 200, { width: 245, align: "right" },
+    );
+    pdf.fillColor("#334155").font("Helvetica").fontSize(6.2);
+    pdf.text(`${language === "en" ? "Exempt purchase order No." : "No. Orden de compra exenta"}: ${document.exempt_purchase_order || "-"}`, 310, 213, { width: 245, height: 22, align: "right", ellipsis: true });
+    pdf.text(`${language === "en" ? "Exonerated registry certificate No." : "No. Constancia del registro exonerado"}: ${document.exonerated_registry_number || "-"}`, 310, 237, { width: 245, height: 22, align: "right", ellipsis: true });
+    pdf.text(`${language === "en" ? "SAG registry identification No." : "No. Identificativo del registro de la SAG"}: ${document.sag_registry_number || "-"}`, 310, 261, { width: 245, height: 22, align: "right", ellipsis: true });
   }
   let y = 289;
   pdf.roundedRect(45, y, 522, 24, 4).fill(primaryColor);
