@@ -20,7 +20,7 @@ export function storeganiseRentalId(resource: Resource): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function isDeposit(entry: Resource) {
+export function isStoreganiseDeposit(entry: Resource) {
   const labels = [entry.type, ...(Array.isArray(entry.tags) ? entry.tags : [])];
   return labels.some((label) => ["deposit", "security_deposit", "security deposit", "deposito"].includes(normalized(label)));
 }
@@ -41,7 +41,7 @@ export function splitStoreganiseDeposit(resource: Resource, total: number) {
     throw new Error("Storeganise no envió entries con el detalle del cobro. Se espera la factura completa para identificar el depósito.");
   }
   const entries = resource.entries.map(record);
-  const taggedDeposits = entries.filter(isDeposit);
+  const taggedDeposits = entries.filter(isStoreganiseDeposit);
   if (taggedDeposits.some((entry) => entryTotal(entry) < 0)) {
     throw new Error("El cobro incluye una devolución o ajuste negativo de depósito. Requiere revisión, no una nueva proforma.");
   }
