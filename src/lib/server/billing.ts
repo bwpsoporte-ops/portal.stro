@@ -501,7 +501,21 @@ export async function createBillingDocument(input: DocumentInput, transaction?: 
         ],
       );
     }
-    const rentalItems = items.filter((item) => item.catalogCode === "RENTAL_30_DAYS" || /alquiler por 30 d[ií]as/i.test(item.description ?? ""));
+    const storeganiseAutomatic = input.source === "CASH"
+      && input.notes?.trim().startsWith("Storeganise invoice:") === true;
+    const detailedRentalUnits = new Set<string>();
+    const rentalItems = items.filter((item) => {
+      if (storeganiseAutomatic && /^STOREGANISE_(RENTAL|CHARGE)_DETAIL:/.test(item.catalogCode ?? "")) {
+        // Multiple rent periods can be separate lines on the same invoice.
+        // Keep the former single occupancy update per unit; extras never rent a unit.
+        if (!item.catalogCode?.startsWith("STOREGANISE_RENTAL_DETAIL:")) return false;
+        const unitCode = item.description?.match(/^Bodega ([^·]+) ·/i)?.[1]?.trim();
+        if (!unitCode || detailedRentalUnits.has(unitCode)) return false;
+        detailedRentalUnits.add(unitCode);
+        return true;
+      }
+      return item.catalogCode === "RENTAL_30_DAYS" || /alquiler por 30 d[ií]as/i.test(item.description ?? "");
+    });
     if (input.documentType === "INVOICE" && input.source === "CASH" && rentalItems.length) {
       const customerKey = input.customerId
         ? `PORTAL:${input.customerId}`
@@ -513,7 +527,6 @@ export async function createBillingDocument(input: DocumentInput, transaction?: 
         const existing = await client.query<{ id: string; customer_key: string; customer_name: string; status: string }>(
           `SELECT id,customer_key,customer_name,status FROM storage_occupancies WHERE unit_code=$1 FOR UPDATE`, [unitCode],
         );
-        const storeganiseAutomatic = input.notes?.trim().startsWith("Storeganise invoice:") === true;
         if (existing.rowCount && existing.rows[0].status === "ACTIVE" && (!storeganiseAutomatic || existing.rows[0].customer_key !== customerKey)) {
           throw new Error(`La bodega ${unitCode} ya está ocupada por ${existing.rows[0].customer_name}. No puede facturarse nuevamente desde Caja.`);
         }
@@ -909,29 +922,21 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
   pdf.text(words.total, 503, y + 8, { width: 60, align: "right" });
   y += 30;
   let currentUnit = "";
-  const pdfItems = [...document.items].sort((left, right) =>
-    left.description.localeCompare(right.description, "es", {
-      numeric: true,
-    }),
-  );
-  for (const item of pdfItems) {
-    if (y > 610) {
-      pdf.addPage({ size: "LETTER", margin: 45 });
-      pdf.rect(0, 0, 612, 8).fill(primaryColor);
-      pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(9).text(`${document.document_number} · ${language === "en" ? "DETAIL CONTINUED" : "CONTINUACIÓN DEL DETALLE"}`, 45, 28, { width: 522, align: "right" });
-      y = 52;
-      pdf.roundedRect(45, y, 522, 24, 4).fill(primaryColor);
-      pdf.fillColor("#ffffff").font("Helvetica-Bold").fontSize(5.6);
-      pdf.text(words.description, 49, y + 8, { width: 164 });
-      pdf.text(words.quantity, 217, y + 8, { width: 40, align: "right" });
-      pdf.text(words.price, 261, y + 8, { width: 64, align: "right" });
-      pdf.text(words.discountColumn, 329, y + 8, { width: 54, align: "right" });
-      pdf.text(words.taxableBase, 387, y + 8, { width: 62, align: "right" });
-      pdf.text(words.vat, 453, y + 8, { width: 46, align: "right" });
-      pdf.text(words.total, 503, y + 8, { width: 60, align: "right" });
-      y += 30;
-      currentUnit = "";
+  // Only the new automatic detail codes opt in. Manual and historical PDFs
+  // retain their existing ordering, text formatting and currency calculations.
+  const detailedStoreganise = document.document_type === "INVOICE" && document.source === "CASH"
+    && document.notes?.startsWith("Storeganise invoice:") === true
+    && document.items.some((item) => /^STOREGANISE_(RENTAL|CHARGE)_DETAIL:/.test(item.catalogCode ?? ""));
+  const pdfItems = [...document.items].sort((left, right) => {
+    if (detailedStoreganise) {
+      const rentalOrder = Number(!left.catalogCode?.startsWith("STOREGANISE_RENTAL_DETAIL:"))
+        - Number(!right.catalogCode?.startsWith("STOREGANISE_RENTAL_DETAIL:"));
+      if (rentalOrder) return rentalOrder;
+      return Number(left.catalogCode?.split(":")[1] ?? 0) - Number(right.catalogCode?.split(":")[1] ?? 0);
     }
+    return left.description.localeCompare(right.description, "es", { numeric: true });
+  });
+  for (const item of pdfItems) {
     const serviceMatch = item.description.match(/^Bodega ([^·]+) · (.+)$/);
     const unit = serviceMatch?.[1]?.trim() ?? "";
     const originalDescription = serviceMatch?.[2]?.trim() ?? item.description;
@@ -949,7 +954,25 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
         ? `Storage unit ${unit} rental for 30 days`
         : `Alquiler de unidad de almacenamiento ${unit} por 30 días`;
     }
-
+    pdf.font("Helvetica").fontSize(6.5);
+    const rowHeight = detailedStoreganise ? Math.max(24, Math.ceil(pdf.heightOfString(description, { width: 164 })) + 6) : 24;
+    if (detailedStoreganise ? y + rowHeight + (unit && unit !== currentUnit ? 24 : 0) > 650 : y > 610) {
+      pdf.addPage({ size: "LETTER", margin: 45 });
+      pdf.rect(0, 0, 612, 8).fill(primaryColor);
+      pdf.fillColor(primaryColor).font("Helvetica-Bold").fontSize(9).text(`${document.document_number} · ${language === "en" ? "DETAIL CONTINUED" : "CONTINUACIÓN DEL DETALLE"}`, 45, 28, { width: 522, align: "right" });
+      y = 52;
+      pdf.roundedRect(45, y, 522, 24, 4).fill(primaryColor);
+      pdf.fillColor("#ffffff").font("Helvetica-Bold").fontSize(5.6);
+      pdf.text(words.description, 49, y + 8, { width: 164 });
+      pdf.text(words.quantity, 217, y + 8, { width: 40, align: "right" });
+      pdf.text(words.price, 261, y + 8, { width: 64, align: "right" });
+      pdf.text(words.discountColumn, 329, y + 8, { width: 54, align: "right" });
+      pdf.text(words.taxableBase, 387, y + 8, { width: 62, align: "right" });
+      pdf.text(words.vat, 453, y + 8, { width: 46, align: "right" });
+      pdf.text(words.total, 503, y + 8, { width: 60, align: "right" });
+      y += 30;
+      currentUnit = "";
+    }
     if (unit && unit !== currentUnit) {
       currentUnit = unit;
       pdf.fillColor("#e8f5eb").rect(45, y - 4, 522, 20).fill();
@@ -959,14 +982,16 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
 
     const itemDiscount = converted(item.discount);
     const itemBase = converted(item.subtotal);
-    pdf.fillColor("#334155").font("Helvetica").fontSize(6.5).text(description, 49, y, { width: 164, height: 22, ellipsis: true });
-    pdf.text(Number(item.quantity).toFixed(2), 217, y, { width: 40, align: "right" });
+    pdf.fillColor("#334155").font("Helvetica").fontSize(6.5).text(description, 49, y,
+      detailedStoreganise ? { width: 164 } : { width: 164, height: 22, ellipsis: true });
+    const quantityDecimals = detailedStoreganise && Math.abs(Number(item.quantity) * 100 - Math.round(Number(item.quantity) * 100)) > 0.000001 ? 3 : 2;
+    pdf.text(Number(item.quantity).toFixed(quantityDecimals), 217, y, { width: 40, align: "right" });
     pdf.text(`${renderCurrency} ${fiscalAmount(converted(item.unitPrice))}`, 261, y, { width: 64, align: "right" });
     pdf.text(`${renderCurrency} ${fiscalAmount(itemDiscount)}`, 329, y, { width: 54, align: "right" });
     pdf.text(`${renderCurrency} ${fiscalAmount(itemBase)}`, 387, y, { width: 62, align: "right" });
     pdf.text(`${renderCurrency} ${fiscalAmount(converted(item.tax))}`, 453, y, { width: 46, align: "right" });
     pdf.text(`${renderCurrency} ${fiscalAmount(converted(item.total))}`, 503, y, { width: 60, align: "right" });
-    y += 24;
+    y += rowHeight;
   }
   y += 8;
   if (y > 405) {
