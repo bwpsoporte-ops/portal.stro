@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool } from "@/lib/server/db";
 import { createBillingDocument } from "@/lib/server/billing";
+import { buildStoreganiseInvoiceLines } from "./storeganise-invoice-lines";
 import { ensureIntegrationSchema } from "./schema";
 import {
   splitStoreganiseDeposit,
@@ -530,25 +531,6 @@ function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-function taxInclusiveNet(total: number, taxRate: number) {
-  if (taxRate <= 0) return roundMoney(total);
-  const targetCents = Math.round(total * 100);
-  const estimate = Math.round(targetCents / (1 + taxRate / 100));
-  for (let offset = -10; offset <= 10; offset += 1) {
-    const netCents = estimate + offset;
-    const taxCents = Math.round(netCents * taxRate / 100);
-    if (netCents + taxCents === targetCents) return netCents / 100;
-  }
-  return roundMoney(total / (1 + taxRate / 100));
-}
-
-function billingPeriod(data: JsonObject) {
-  const raw = text(first(data, "period", "invoiceDate", "date", "createdAt", "created_at", "dueDate"));
-  const date = raw ? new Date(raw) : new Date();
-  const valid = Number.isNaN(date.getTime()) ? new Date() : date;
-  return new Intl.DateTimeFormat("es-HN", { month: "long", year: "numeric", timeZone: "UTC" }).format(valid);
-}
-
 // Called only with documents just created in this same transaction. Never
 // updates an existing invoice/proforma or invents the gateway's payment method.
 async function recordNewStoreganiseReceipt(
@@ -668,12 +650,9 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
     const split = splitStoreganiseDeposit(resource, total);
     const configuredTax = Number(process.env.STOREGANISE_TAX_RATE ?? 15);
     const taxRate = Number.isFinite(configuredTax) && configuredTax >= 0 ? configuredTax : 15;
-    const net = taxInclusiveNet(split.rentalTotal, taxRate);
     const unitLabel = row.unit_number?.trim() || "";
-    const period = billingPeriod(resource);
-    const description = unitLabel
-      ? `Bodega ${unitLabel} · Alquiler por 30 días · ${period}`
-      : `Alquiler de bodega · ${period}`;
+    // Validate every non-deposit entry before creating either document.
+    const invoiceLines = buildStoreganiseInvoiceLines(resource, split.rentalTotal, unitLabel, taxRate);
     const sourceCurrency = row.currency.toUpperCase() === "HNL" ? "HNL" : "USD";
     let proformaId: string | null = null;
     if (split.depositTotal > 0 && split.rentalId) {
@@ -709,7 +688,9 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
             discountPercent: 0,
             taxRate: 0,
           }],
-          notes: `Depósito recibido y confirmado por Storeganise. Alquiler: ${split.rentalId}. Cobro de origen: ${storeganiseInvoiceId}. Separado de la factura del alquiler.`,
+          // Technical IDs remain in integration_rental_deposits and receipts,
+          // not in the customer's PDF. Existing proformas are never rewritten.
+          notes: `Depósito en garantía recibido para la bodega ${unitLabel}. Este documento corresponde únicamente al depósito; el alquiler y los cargos adicionales se detallan por separado en su factura.`,
           status: "ACCEPTED",
           currency: sourceCurrency,
         }, lockClient);
@@ -736,14 +717,7 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
         customerId: row.customer_id,
         unitId: row.unit_id ?? undefined,
         unitLabel: unitLabel || undefined,
-        items: [{
-          catalogCode: unitLabel ? "RENTAL_30_DAYS" : "STOREGANISE_RENTAL",
-          description,
-          quantity: 1,
-          unitPrice: net,
-          discountPercent: 0,
-          taxRate,
-        }],
+        items: invoiceLines,
         notes: note,
         status: "PAID",
         currency: sourceCurrency,
