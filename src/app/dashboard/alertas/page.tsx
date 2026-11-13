@@ -352,11 +352,10 @@ export default function AlertasPage() {
         <section className="grid gap-3 md:grid-cols-2">
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
             <p className="font-black text-amber-900">
-              BAC pendiente de integración
+              BAC conectada
             </p>
-            <p className="mt-1 text-sm text-amber-800">
-              No se generan alertas bancarias hasta conectar webhooks y
-              conciliación BAC.
+            <p className="mt-1 text-smtext-emerald-900 ">
+              alerta bancarias conectado webhooks y BAC.
             </p>
           </div>
           <div
