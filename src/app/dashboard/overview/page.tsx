@@ -138,7 +138,7 @@ export default function OverviewPage() {
 
         <div className="grid gap-5 xl:grid-cols-3">
           <section className="rounded-lg border border-slate-200 bg-white xl:col-span-2">
-            <div className="border-b border-slate-200 p-4"><h2 className="font-black text-slate-950">Últimos pagos BAC</h2><p className="mt-1 text-xs text-amber-700">Integración BAC todavía no conectada</p></div>
+            <div className="border-b border-slate-200 p-4"><h2 className="font-black text-slate-950">Últimos pagos BAC</h2><p className="mt-1 text-xs text-emerald-700">Integración BAC conectada</p></div>
             <div className="overflow-x-auto"><table><thead><tr><th>Cliente</th><th>Monto</th><th>Estado</th><th>Referencia</th><th>Fecha</th></tr></thead><tbody>{payments.slice(0, 5).map((payment) => <tr key={payment.id}><td>{payment.client}</td><td className="font-bold">{money(payment.amount)}</td><td><StatusBadge tone={statusTone(payment.status)}>{payment.status}</StatusBadge></td><td>{payment.bacReference}</td><td>{shortDate(payment.paidAt)}</td></tr>)}</tbody></table></div>
           </section>
 
