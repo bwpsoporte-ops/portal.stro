@@ -110,8 +110,8 @@ export default function OverviewPage() {
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Total facturado hoy" value={hnlMoney(Number(metrics.billed_today_hnl))} hint={`${usdMoney(Number(metrics.billed_today_usd))} USD · referencia`} />
           <MetricCard label="Total facturado del mes" value={hnlMoney(Number(metrics.billed_month_hnl))} hint={`${usdMoney(Number(metrics.billed_month_usd))} USD · referencia`} />
-          <MetricCard label="Pagos BAC aprobados" value={String(integrationOverview.approvedPayments)} hint="Pendiente de conexión BAC" />
-          <MetricCard label="Pagos BAC pendientes" value={String(integrationOverview.pendingPayments)} hint="Pendiente de conexión BAC" />
+          <MetricCard label="Pagos BAC aprobados" value={String(integrationOverview.approvedPayments)} hint="Conectado de conexión BAC" />
+          <MetricCard label="Pagos BAC pendientes" value={String(integrationOverview.pendingPayments)} hint="Conectado de conexión BAC" />
           <MetricCard label="Facturas generadas" value={String(metrics.generated_invoices)} hint="Facturas fiscales vigentes" />
           <MetricCard label="Facturas enviadas" value={String(metrics.sent_invoices)} hint="Envíos reales registrados" />
           <MetricCard label="Correlativos disponibles" value={String(fiscal?.available ?? 0)} hint={fiscal?.cai ?? "Sin CAI activo"} />
