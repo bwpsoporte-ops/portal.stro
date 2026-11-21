@@ -35,6 +35,32 @@ function rental(entry: Resource) {
     .some((value) => ["rent", "rental", "alquiler"].includes(normalize(value)));
 }
 
+/** Opt in only standalone charges to invoicing before payment. This does not
+ * change the rental/deposit classifiers used by the existing paid flow.
+ * Some rentals arrive as `revenue`, so their descriptions must also exclude
+ * them from this exception. Unknown entries keep the existing payment gate.
+ */
+export function isStandaloneStoreganiseCharge(resource: Resource): boolean {
+  if (!Array.isArray(resource.entries) || !resource.entries.length) return false;
+  return resource.entries.every((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const entry = value as Resource;
+    if (rental(entry) || isStoreganiseDeposit(entry)) return false;
+    const description = label(entry.desc) || label(entry.description) || label(entry.name);
+    const tags = [entry.type, ...(Array.isArray(entry.tags) ? entry.tags : [])].map(normalize);
+    const words = [...tags, description].join(" ").normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    if (/\b(rent(?:al)?|alquiler|renta|arrendamiento|deposit(?:o)?|security[ _-]?deposit|reserva|reservation|move[ _-]?in)\b/.test(words)) {
+      return false;
+    }
+    const chargeType = tags.some((tag) => [
+      "revenue", "charge", "service", "addon", "add-on", "fee", "item", "product", "accessory",
+    ].includes(tag));
+    const serviceDescription = /\b(electricidad|electricity|internet|wi[ -]?fi|parqueo|parking|candado|padlock|servicios?|services?|cargos?|charges?|extras?)\b/.test(words);
+    return Boolean(description) && (chargeType || serviceDescription);
+  });
+}
+
 function dateLabel(value: unknown) {
   if (typeof value !== "string") return "";
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(value);
