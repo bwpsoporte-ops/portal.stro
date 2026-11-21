@@ -1,5 +1,111 @@
-import type { CardPaymentRow, CardPaymentStatus, CardPaymentsResponse } from "@/lib/card-payments";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import type { CardPaymentRow, CardPaymentStatus, CardPaymentsResponse, CardPaymentsAccess } from "@/lib/card-payments";
 import { getPool } from "@/lib/server/db";
+
+const ACCESS_SECONDS = 15 * 60;
+const ACCESS_SCOPE = "pagos-bac:read";
+
+export class CardPaymentsAccessError extends Error {
+  constructor(public readonly code: "CONFIGURATION" | "RATE_LIMIT") { super(code); }
+}
+
+function accessSecret() {
+  // Never use NEXT_PUBLIC_* values to sign access tokens. An independent
+  // PAGOS_BAC_SESSION_SECRET can be set without changing the global login.
+  const secret = process.env.PAGOS_BAC_SESSION_SECRET || process.env.ROOT_PASSWORD;
+  if (!secret) throw new CardPaymentsAccessError("CONFIGURATION");
+  return secret;
+}
+
+function signature(value: string) {
+  return createHmac("sha256", accessSecret()).update(value).digest("base64url");
+}
+
+function equalSecret(left: string, right: string) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Bounded, per-instance throttle. In a multi-instance deployment, supplement
+// this with an edge/WAF rate limit; no authentication tables are created here.
+const accessAttempts = new Map<string, { count: number; until: number }>();
+let globalAttempts = { count: 0, until: 0 };
+function throttle(username: string) {
+  const now = Date.now();
+  for (const [key, value] of accessAttempts) if (value.until <= now) accessAttempts.delete(key);
+  if (globalAttempts.until <= now) globalAttempts = { count: 0, until: now + 60_000 };
+  const key = signature(`attempt:${username}`);
+  const entry = accessAttempts.get(key) ?? { count: 0, until: now + 5 * 60_000 };
+  if (entry.count >= 5 || globalAttempts.count >= 60 || accessAttempts.size >= 2000) {
+    throw new CardPaymentsAccessError("RATE_LIMIT");
+  }
+  entry.count++;
+  globalAttempts.count++;
+  accessAttempts.set(key, entry);
+  return key;
+}
+
+function rootCredentials() {
+  const username = process.env.ROOT_USERNAME ?? process.env.NEXT_PUBLIC_ROOT_USERNAME;
+  const password = process.env.ROOT_PASSWORD;
+  return username && password ? { username: username.trim().toLowerCase(), password } : null;
+}
+
+function credentialVersion(id: string, verifier: string) {
+  return signature(`credential:${id}:${verifier}`);
+}
+
+export async function authorizeCardPayments(username: string, password: string): Promise<CardPaymentsAccess | null> {
+  const normalizedUsername = username.trim().toLowerCase();
+  const attemptKey = throttle(normalizedUsername);
+  const root = rootCredentials();
+  let user: { id: string; name: string; version: string };
+  if (root && normalizedUsername === root.username) {
+    if (!equalSecret(password, root.password)) return null;
+    user = { id: "USR-ROOT", name: process.env.ROOT_NAME || "Root", version: credentialVersion("USR-ROOT", `${root.username}:${root.password}`) };
+  } else {
+    // SELECT only: preserve last_access, global sessions, roles and permissions.
+    // Do not use db.query(), whose initializer performs unrelated migrations.
+    const result = await getPool().query<{ id: string; display_name: string; password_hash: string; valid: boolean }>(
+      `SELECT id,display_name,password_hash,password_hash=crypt($2,password_hash) AS valid
+       FROM app_users WHERE lower(username)=$1 AND status='ACTIVO' LIMIT 1`,
+      [normalizedUsername, password],
+    );
+    const row = result.rows[0];
+    if (!row?.valid) return null;
+    user = { id: row.id, name: row.display_name, version: credentialVersion(row.id, row.password_hash) };
+  }
+  const expires = Math.floor(Date.now() / 1000) + ACCESS_SECONDS;
+  const payload = Buffer.from(JSON.stringify({ scope: ACCESS_SCOPE, sub: user.id, version: user.version, exp: expires, nonce: randomUUID() })).toString("base64url");
+  accessAttempts.delete(attemptKey);
+  return { token: `${payload}.${signature(payload)}`, expiresAt: new Date(expires * 1000).toISOString(), user: { id: user.id, name: user.name } };
+}
+
+export async function hasCardPaymentsAccess(authorization: string | null) {
+  if (!authorization?.startsWith("Bearer ") || authorization.length > 2048) return false;
+  const token = authorization.slice(7);
+  const parts = token.split(".");
+  if (parts.length !== 2 || !parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part))) return false;
+  const [encoded, mac] = parts;
+  if (!equalSecret(mac, signature(encoded))) return false;
+  let payload: { scope?: unknown; sub?: unknown; version?: unknown; exp?: unknown };
+  try { payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")); } catch { return false; }
+  const now = Math.floor(Date.now() / 1000);
+  if (!payload || payload.scope !== ACCESS_SCOPE || typeof payload.sub !== "string" || payload.sub.length > 128
+    || typeof payload.version !== "string" || typeof payload.exp !== "number" || !Number.isSafeInteger(payload.exp)
+    || payload.exp <= now || payload.exp > now + ACCESS_SECONDS) return false;
+  if (payload.sub === "USR-ROOT") {
+    const root = rootCredentials();
+    return Boolean(root && equalSecret(payload.version, credentialVersion("USR-ROOT", `${root.username}:${root.password}`)));
+  }
+  // Recheck activation and password version on every read, so disabling an
+  // account or changing its password invalidates access without a schema change.
+  const result = await getPool().query<{ password_hash: string }>(
+    "SELECT password_hash FROM app_users WHERE id=$1 AND status='ACTIVO'", [payload.sub],
+  );
+  return Boolean(result.rows[0] && equalSecret(payload.version, credentialVersion(payload.sub, result.rows[0].password_hash)));
+}
 
 type Json = Record<string, unknown>;
 const record = (value: unknown): Json => value && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
