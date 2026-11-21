@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
-import { money, shortDate } from "@/lib/dashboard-data";
+import { shortDate } from "@/lib/dashboard-data";
 
 type StoreganiseStatus = "RECEIVED" | "PROCESSING" | "PROCESSED" | "FAILED" | "RETRYING" | "IGNORED";
 
@@ -17,6 +17,7 @@ type StoreganiseLog = {
   storeganiseInvoiceId: string;
   storeganiseUserId: string;
   amount: number | null;
+  currency?: string;
   status: StoreganiseStatus;
   receivedAt: string;
   processedAt?: string;
@@ -49,6 +50,16 @@ const defaultEventTypes = [
 ];
 
 const statuses: Array<StoreganiseStatus | "TODOS"> = ["TODOS", "RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "RETRYING", "IGNORED"];
+
+function storeganiseMoney(value: number, sourceCurrency?: string) {
+  const currency = sourceCurrency?.trim().toUpperCase() || "USD";
+  const amount = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+  // Display the original amount; never convert it or relabel HNL as USD.
+  return currency === "USD" ? `$${amount}` : `${currency} ${amount}`;
+}
 
 function statusToneForStoreganise(status: StoreganiseStatus) {
   if (status === "PROCESSED") return "green";
@@ -224,7 +235,7 @@ export default function StoreganisePage() {
                         <p className="text-xs text-slate-500">{log.email}</p>
                       </td>
                       <td>{log.storeganiseInvoiceId}</td>
-                      <td className="font-black">{log.amount === null ? <span className="text-xs text-slate-400">No aplica</span> : money(log.amount)}</td>
+                      <td className="font-black">{log.amount === null ? <span className="text-xs text-slate-400">No aplica</span> : storeganiseMoney(log.amount, log.currency)}</td>
                       <td><StatusBadge tone={statusToneForStoreganise(log.status)}>{log.status}</StatusBadge></td>
                       <td>{shortDate(log.receivedAt)}</td>
                       <td>{log.processedAt ? shortDate(log.processedAt) : "Pendiente"}</td>
