@@ -1,13 +1,12 @@
 "use client";
 
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
-import { getCurrentUser } from "@/lib/auth";
 import {
   cardPaymentDate, cardPaymentLabels, cardPaymentMoney, hondurasDate,
-  type CardPaymentRow, type CardPaymentsAccess, type CardPaymentsResponse, type CardPaymentStatus,
+  type CardPaymentRow, type CardPaymentsResponse, type CardPaymentStatus,
 } from "@/lib/card-payments";
 
 function statusTone(status: CardPaymentStatus) {
@@ -35,30 +34,8 @@ export default function PagosBacPage() {
   const [invoiceFilter, setInvoiceFilter] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const activeRequest = useRef<AbortController | null>(null);
-  const access = useRef<CardPaymentsAccess | null>(null);
-  const [authorized, setAuthorized] = useState(false);
-  const [username, setUsername] = useState("");
-  const [accessName, setAccessName] = useState("");
-
-  const lockModule = useCallback((message = "") => {
-    activeRequest.current?.abort();
-    activeRequest.current = null;
-    access.current = null;
-    setAuthorized(false);
-    setLoading(false);
-    setData(null);
-    setSelectedKey(null);
-    setAccessName("");
-    setError(message);
-  }, []);
-
   const load = useCallback(async () => {
-    const session = access.current;
-    if (!session || activeRequest.current) return;
-    if (getCurrentUser()?.id !== session.user.id || Date.parse(session.expiresAt) <= Date.now()) {
-      lockModule("Valida nuevamente tu cuenta para consultar los pagos.");
-      return;
-    }
+    if (activeRequest.current) return;
     const controller = new AbortController();
     activeRequest.current = controller;
     let timedOut = false;
@@ -66,21 +43,16 @@ export default function PagosBacPage() {
     setLoading(true);
     try {
       const response = await fetch("/api/pagos-bac", {
-        cache: "no-store", credentials: "omit", signal: controller.signal,
-        headers: { Authorization: `Bearer ${session.token}` },
+        cache: "no-store", credentials: "same-origin", signal: controller.signal,
       });
       const result = await response.json();
-      if (controller.signal.aborted || access.current !== session) return;
-      if (getCurrentUser()?.id !== session.user.id) { lockModule(); return; }
-      if (response.status === 401 || response.status === 403) {
-        lockModule(result.message || "Valida nuevamente tu cuenta para consultar los pagos.");
-        return;
-      }
+      if (controller.signal.aborted) return;
       if (!response.ok || !result.ok) throw new Error(result.message || "No se pudieron consultar los pagos.");
       if (!Array.isArray(result.payments)) throw new Error("La respuesta de pagos no es válida.");
-      if (!controller.signal.aborted) { setData(result); setError(""); }
+      setData(result);
+      setError("");
     } catch (failure) {
-      if ((!controller.signal.aborted || timedOut) && access.current === session) {
+      if ((!controller.signal.aborted || timedOut) && activeRequest.current === controller) {
         setError(timedOut ? "La consulta tardó demasiado. Vuelve a actualizar." : failure instanceof Error ? failure.message : "No se pudieron cargar los pagos.");
       }
     } finally {
@@ -90,84 +62,21 @@ export default function PagosBacPage() {
         setLoading(false);
       }
     }
-  }, [lockModule]);
-
-  const validateAccess = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (activeRequest.current) return;
-    const portalUser = getCurrentUser();
-    if (!portalUser) { lockModule("Primero inicia sesión en la plataforma."); return; }
-    const form = event.currentTarget;
-    const password = String(new FormData(form).get("password") ?? "");
-    const controller = new AbortController();
-    activeRequest.current = controller;
-    let timedOut = false;
-    const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
-    setLoading(true);
-    setError("");
-    let granted = false;
-    try {
-      const response = await fetch("/api/pagos-bac", {
-        method: "POST", credentials: "omit", cache: "no-store", signal: controller.signal,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      const result = await response.json();
-      if (controller.signal.aborted) return;
-      if (!response.ok || !result.ok) throw new Error(result.message || "No se pudo validar tu cuenta.");
-      const next = result.access as CardPaymentsAccess | undefined;
-      if (!next?.token || !next.user?.id || !Number.isFinite(Date.parse(next.expiresAt))) throw new Error("La respuesta de acceso no es válida.");
-      if (getCurrentUser()?.id !== portalUser.id || next.user.id !== portalUser.id) {
-        throw new Error("Valida con la misma cuenta con la que ingresaste a la plataforma.");
-      }
-      access.current = next;
-      setAccessName(next.user.name);
-      setAuthorized(true);
-      granted = true;
-    } catch (failure) {
-      if (!controller.signal.aborted || timedOut) {
-        setError(timedOut ? "La validación tardó demasiado. Intenta nuevamente." : failure instanceof Error ? failure.message : "No se pudo validar tu cuenta.");
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      const passwordInput = form.elements.namedItem("password");
-      if (passwordInput instanceof HTMLInputElement) passwordInput.value = "";
-      if (activeRequest.current === controller) { activeRequest.current = null; setLoading(false); }
-    }
-    if (granted) await load();
-  };
+  }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => { setUsername(getCurrentUser()?.email ?? ""); }, 0);
+    const initial = window.setTimeout(() => { void load(); }, 0);
     const refresh = () => { if (document.visibilityState === "visible") void load(); };
-    const changedUser = () => {
-      if (access.current && getCurrentUser()?.id !== access.current.user.id) lockModule();
-    };
     const interval = window.setInterval(refresh, 30000);
     document.addEventListener("visibilitychange", refresh);
-    window.addEventListener("storage", changedUser);
-    // BFCache must not restore visible payment data after leaving this module.
-    window.addEventListener("pagehide", lockOnLeave);
-    function lockOnLeave() { lockModule(); }
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refresh);
-      window.removeEventListener("storage", changedUser);
-      window.removeEventListener("pagehide", lockOnLeave);
       activeRequest.current?.abort();
       activeRequest.current = null;
-      access.current = null;
     };
-  }, [load, lockModule]);
-
-  useEffect(() => {
-    if (!authorized || !access.current) return;
-    const timeout = window.setTimeout(() => {
-      lockModule("El acceso de consulta venció. Valida nuevamente tu cuenta.");
-    }, Math.max(0, Date.parse(access.current.expiresAt) - Date.now()));
-    return () => window.clearTimeout(timeout);
-  }, [authorized, lockModule]);
+  }, [load]);
 
   const filtered = useMemo(() => (data?.payments ?? []).filter((payment) => {
     const searchable = [payment.customerName, payment.customerEmail, payment.reference, payment.transactionId, payment.paymentId, payment.unitLabel, payment.processor].join(" ").toLowerCase();
@@ -193,39 +102,10 @@ export default function PagosBacPage() {
   }, [filtered]);
   const metric = (value: string | number) => data ? String(value) : "—";
 
-  if (!authorized) {
-    return (
-      <>
-        <PageHeader title="Pagos BAC" description="Transacciones con tarjeta registradas en Storeganise: clientes, importes y referencias." />
-        <div className="p-5">
-          <section className="mx-auto max-w-xl rounded-lg border border-sky-200 bg-white p-6">
-            <h2 className="text-lg font-black text-slate-950">Acceso a transacciones</h2>
-            <p className="mt-2 text-sm text-slate-600">Disponible para las cuentas activas de la plataforma, no solo root. Confirma tus credenciales para consultar los pagos.</p>
-            <form onSubmit={(event) => void validateAccess(event)} className="mt-5 space-y-4">
-              <label className="block text-sm font-bold text-slate-700">Usuario o correo
-                <TextInput name="username" autoComplete="username" required maxLength={254} value={username} onChange={(event) => setUsername(event.target.value)} disabled={loading} />
-              </label>
-              <label className="block text-sm font-bold text-slate-700">Contraseña
-                <TextInput name="password" type="password" autoComplete="current-password" required maxLength={72} disabled={loading} />
-              </label>
-              {error ? <p role="alert" className="rounded-md bg-rose-50 p-3 text-sm font-bold text-rose-800">{error}</p> : null}
-              <button type="submit" disabled={loading} className="rounded-md bg-sky-700 px-4 py-2 text-sm font-black text-white hover:bg-sky-800 disabled:opacity-50">{loading ? "Validando..." : "Consultar pagos"}</button>
-            </form>
-            <p className="mt-4 text-xs text-slate-500">Acceso de consulta durante 15 minutos o hasta salir del módulo. No cambia tu sesión general ni realiza cobros.</p>
-          </section>
-        </div>
-      </>
-    );
-  }
-
   return (
     <>
       <PageHeader title="Pagos BAC" description="Transacciones con tarjeta registradas en Storeganise: clientes, importes, referencias y relación con la factura fiscal." />
       <div className="space-y-5 p-5">
-        <div className="no-print flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
-          <span>Consulta autorizada: <strong>{accessName}</strong></span>
-          <ActionButton variant="secondary" onClick={() => lockModule()}>Cerrar acceso a pagos</ActionButton>
-        </div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Pagos registrados / aprobados" value={metric(metrics.received)} hint="Con tarjeta · según Storeganise" />
           <MetricCard label="Pagos pendientes" value={metric(metrics.pending)} hint="Solo cuando Storeganise informa ese estado" />
