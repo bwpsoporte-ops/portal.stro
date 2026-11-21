@@ -2,7 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool } from "@/lib/server/db";
 import { createBillingDocument } from "@/lib/server/billing";
-import { buildStoreganiseInvoiceLines } from "./storeganise-invoice-lines";
+import {
+  buildStoreganiseInvoiceLines,
+  isStandaloneStoreganiseCharge,
+  type StoreganiseInvoiceLine,
+} from "./storeganise-invoice-lines";
 import { ensureIntegrationSchema } from "./schema";
 import {
   splitStoreganiseDeposit,
@@ -531,8 +535,9 @@ function roundMoney(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-// Called only with documents just created in this same transaction. Never
-// updates an existing invoice/proforma or invents the gateway's payment method.
+// Called for newly created documents, or for a new SERVICE_V1 invoice after
+// settlePendingStoreganiseServiceInvoice has locked and validated it. Legacy
+// invoices/proformas never enter that settlement path. Never infer the method.
 async function recordNewStoreganiseReceipt(
   client: PoolClient,
   document: { id: string; total: number; currency: string },
@@ -555,6 +560,94 @@ async function recordNewStoreganiseReceipt(
        paid_at=COALESCE($2::timestamptz,now()) WHERE id=$1`,
     [document.id, payment.paidAt],
   );
+}
+
+// A private, non-rendered marker opts only newly issued service invoices into
+// later settlement. Keep the original numeric item index for PDF ordering.
+// The fingerprint freezes the original source amounts/customer/currency so a
+// changed Storeganise charge cannot silently pay a different fiscal invoice.
+function markStandaloneServiceLines(
+  lines: StoreganiseInvoiceLine[], total: number, currency: string, customerId: string,
+) {
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify({ customerId, currency, total: roundMoney(total), lines }))
+    .digest("hex");
+  return lines.map((line) => ({
+    ...line,
+    catalogCode: `${line.catalogCode}:SERVICE_V1:${fingerprint}`,
+  }));
+}
+
+async function settlePendingStoreganiseServiceInvoice(
+  client: PoolClient,
+  documentId: string,
+  storeganiseInvoiceId: string,
+  resource: JsonObject,
+  source: { total: number; currency: string; customerId: string | null },
+) {
+  const result = await client.query<{
+    id: string; total: string; currency: string; status: string;
+    amount_paid: string; credited_amount: string; customer_id: string | null;
+    unit_label: string | null;
+  }>(
+    `SELECT d.id,d.total,d.currency,d.status,d.amount_paid,d.credited_amount,d.customer_id,d.unit_label
+     FROM billing_documents d
+     WHERE d.id=$1 AND d.document_type='INVOICE' AND d.source='CASH'
+       AND d.notes=$2
+       AND EXISTS (SELECT 1 FROM billing_document_items di WHERE di.document_id=d.id
+         AND di.catalog_code ~ '^STOREGANISE_CHARGE_DETAIL:[0-9]+:SERVICE_V1:[a-f0-9]{64}$')
+     FOR UPDATE OF d`,
+    [documentId, `Storeganise invoice: ${storeganiseInvoiceId}`],
+  );
+  // No marker means an existing/manual/rental invoice: leave it untouched.
+  if (!result.rowCount) return null;
+  const document = result.rows[0];
+  if (document.status === "PAID") return { id: documentId, duplicate: true };
+  if (!storeganisePaymentConfirmed(resource, source.total)) {
+    return { id: documentId, waitingForPayment: true };
+  }
+  if (document.status !== "PENDING_PAYMENT" || Number(document.amount_paid) !== 0
+    || Number(document.credited_amount) !== 0) {
+    throw new Error("La factura de servicios tiene pagos, créditos o una anulación local. Revisa la conciliación; no se duplicará el pago.");
+  }
+  if (!source.customerId || document.customer_id !== source.customerId
+    || !isStandaloneStoreganiseCharge(resource)
+    || roundMoney(amount(first(resource, "total", "grandTotal", "amount"))) !== roundMoney(source.total)) {
+    throw new Error("El cobro de servicios cambió de cliente, conceptos o importe. Revisa su factura antes de conciliarlo.");
+  }
+  const configuredTax = Number(process.env.STOREGANISE_TAX_RATE ?? 15);
+  const taxRate = Number.isFinite(configuredTax) && configuredTax >= 0 ? configuredTax : 15;
+  const expected = markStandaloneServiceLines(
+    buildStoreganiseInvoiceLines(resource, source.total, document.unit_label?.trim() || "", taxRate),
+    source.total, source.currency, source.customerId,
+  ).map((line) => line.catalogCode).sort();
+  const items = await client.query<{ catalog_code: string | null }>(
+    `SELECT catalog_code FROM billing_document_items WHERE document_id=$1`, [documentId],
+  );
+  const actual = items.rows.map((item) => item.catalog_code ?? "").sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error("El detalle o la moneda del servicio cambió después de emitir la factura. No se alteró el documento; revisa la conciliación.");
+  }
+  const receipts = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM billing_payments WHERE document_id=$1
+                   UNION ALL SELECT 1 FROM storeganise_billing_receipts WHERE document_id=$1) AS exists`,
+    [documentId],
+  );
+  if (receipts.rows[0].exists) {
+    throw new Error("La factura de servicios ya tiene un recibo. Revisa su saldo; no se registrará otro pago automáticamente.");
+  }
+  // Settle the frozen HNL amount, without recalculating FX, tax or correlative.
+  await recordNewStoreganiseReceipt(client, {
+    id: documentId, total: Number(document.total), currency: document.currency,
+  }, storeganiseInvoiceId, resource);
+  await client.query(`UPDATE billing_documents SET updated_at=now() WHERE id=$1`, [documentId]);
+  const payment = storeganisePaymentDetails(resource, storeganiseInvoiceId);
+  await client.query(
+    `UPDATE integration_invoices SET payment_status='APPROVED',payment_method=$2,payment_id=$3,
+       paid_at=COALESCE($4::timestamptz,now()),updated_at=now() WHERE storeganise_invoice_id=$1`,
+    [storeganiseInvoiceId, payment.method, payment.reference, payment.paidAt],
+  );
+  return { id: documentId, paymentConfirmed: true };
 }
 
 async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonObject) {
@@ -597,8 +690,19 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
     );
     if (!linked.rowCount) throw new Error("La factura sincronizada no está disponible para crear el documento fiscal.");
     const row = linked.rows[0];
-    // Existing fiscal invoices are immutable here. A legacy invoice may already
-    // include the deposit; creating a proforma for it would double-count it.
+    if (row.portal_billing_version === 1 && row.billing_document_id) {
+      const settled = await settlePendingStoreganiseServiceInvoice(
+        lockClient, row.billing_document_id, storeganiseInvoiceId, resource,
+        { total: amount(row.amount), currency: row.currency.toUpperCase(), customerId: row.customer_id },
+      );
+      if (settled) {
+        await lockClient.query("COMMIT");
+        return settled;
+      }
+    }
+    // Apart from settling explicitly marked new service invoices above, existing
+    // fiscal documents stay immutable. A legacy invoice may include the deposit;
+    // creating a proforma for it would double-count it.
     if (row.portal_billing_version !== 1 || row.billing_document_id || row.portal_deposit_amount !== null) {
       await lockClient.query("COMMIT");
       return { id: row.billing_document_id, duplicate: true, legacy: row.portal_billing_version !== 1 };
@@ -636,9 +740,40 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
     }
 
     const total = amount(row.amount);
-    // All callers (invoice, rental, unit and move-in events) share this gate.
-    // Reservations, drafts, partial payments and zero balances without an actual
-    // payment never issue documents or consume a fiscal correlative.
+    // Only sent standalone charges may be issued before payment. No job,
+    // rental, deposit or draft enters this exception. A positive total is NOT
+    // evidence of payment: the new document remains pending, without a receipt.
+    if (!storeganisePaymentConfirmed(resource, total) && total > 0 && !row.origin_job_id
+      && String(resource.state ?? resource.status).trim().toLowerCase() === "sent"
+      && isStandaloneStoreganiseCharge(resource)) {
+      if (!row.customer_id) throw new Error("El servicio todavía no tiene un cliente sincronizado.");
+      if (roundMoney(amount(first(resource, "total", "grandTotal", "amount"))) !== roundMoney(total)) {
+        throw new Error("Llegó una actualización concurrente del servicio. Reintenta para leer su importe vigente.");
+      }
+      const currency = row.currency.toUpperCase();
+      if (currency !== "USD" && currency !== "HNL") throw new Error("La moneda del servicio no es USD ni HNL.");
+      const configuredTax = Number(process.env.STOREGANISE_TAX_RATE ?? 15);
+      const taxRate = Number.isFinite(configuredTax) && configuredTax >= 0 ? configuredTax : 15;
+      const unitLabel = row.unit_number?.trim() || "";
+      const lines = buildStoreganiseInvoiceLines(resource, total, unitLabel, taxRate);
+      const invoice = await createBillingDocument({
+        documentType: "INVOICE", source: "CASH", customerId: row.customer_id,
+        unitId: row.unit_id ?? undefined, unitLabel: unitLabel || undefined,
+        items: markStandaloneServiceLines(lines, total, currency, row.customer_id),
+        notes: note, status: "PENDING_PAYMENT", currency,
+      }, lockClient);
+      await lockClient.query(
+        `UPDATE integration_invoices SET billing_document_id=$2,portal_rental_amount=$3,
+          portal_deposit_amount=0,portal_deposit_rental_id=NULL,payment_status='PENDING',
+          payment_method=NULL,payment_id=NULL,paid_at=NULL,updated_at=now()
+         WHERE storeganise_invoice_id=$1`,
+        [storeganiseInvoiceId, invoice.id, total],
+      );
+      await lockClient.query("COMMIT");
+      return { id: invoice.id, created: true, waitingForPayment: true };
+    }
+    // Rental/deposit reservations, drafts and partial payments retain their
+    // existing paid-only gate and their original invoice/proforma separation.
     if (!storeganisePaymentConfirmed(resource, total)) {
       await lockClient.query("COMMIT");
       return { waitingForPayment: true };
