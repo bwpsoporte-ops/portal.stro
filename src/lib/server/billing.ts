@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import nodemailer from "nodemailer";
+import { createSmtpMailer } from "@/lib/server/smtp";
+import { billingEmailTemplate } from "@/lib/server/email-templates";
 import PDFDocument from "pdfkit";
 import type { PoolClient } from "pg";
 import { getPool } from "@/lib/server/db";
@@ -1141,26 +1142,29 @@ export async function createBillingPdf(id: string, options?: { currency?: "USD" 
 async function sendBillingEmail(id: string) {
   const document = await getDocument(id);
   if (!document.customer_email) throw new Error("El cliente no tiene correo.");
-  const host = process.env.SMTP_HOST ?? process.env.GMAIL_SMTP_HOST;
-  const user = process.env.SMTP_USER ?? process.env.GMAIL_SMTP_USER;
-  const pass = process.env.SMTP_PASSWORD ?? process.env.GMAIL_SMTP_APP_PASSWORD;
-  const from = process.env.SMTP_FROM ?? process.env.GMAIL_SMTP_FROM ?? user;
-  if (!host || !from) throw new Error("SMTP no está configurado.");
-  const transport = nodemailer.createTransport({
-    host, port: Number(process.env.SMTP_PORT ?? process.env.GMAIL_SMTP_PORT ?? 587),
-    secure: (process.env.SMTP_SECURE ?? "false") === "true",
-    auth: user ? { user, pass } : undefined,
-  });
+  const transport = createSmtpMailer();
   const attachments = document.source === "SERVICE" && document.exchange_rate
     ? [
         { filename: `${document.document_number}-USD-es.pdf`, content: await createBillingPdf(id, { currency: "USD", language: "es" }), contentType: "application/pdf" },
         { filename: `${document.document_number}-HNL-es.pdf`, content: await createBillingPdf(id, { currency: "HNL", language: "es" }), contentType: "application/pdf" },
       ]
     : [{ filename: `${document.document_number}.pdf`, content: await createBillingPdf(id), contentType: "application/pdf" }];
+  const message = billingEmailTemplate({
+    name: document.customer_name,
+    documentType: document.document_type,
+    documentNumber: document.document_number,
+    date: formatDocumentDate(document.created_at, "es"),
+    currency: document.currency,
+    total: document.total,
+    status: document.status,
+    unit: document.unit_number,
+    filenames: attachments.map((attachment) => attachment.filename),
+  });
   await transport.sendMail({
-    from, to: document.customer_email,
+    to: document.customer_email,
     subject: `${document.document_type === "PROFORMA" ? "Proforma" : "Factura"} ${document.document_number}`,
-    html: `<p>Hola ${document.customer_name},</p><p>Adjuntamos su ${document.document_type === "PROFORMA" ? "proforma" : "factura"} por <strong>${document.currency} ${Number(document.total).toFixed(2)}</strong>.</p><p>Roatan Self Storage</p>`,
-    attachments,
+    html: message.html,
+    text: message.text,
+    attachments: [...message.attachments, ...attachments],
   });
 }
