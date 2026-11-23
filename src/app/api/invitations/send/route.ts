@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
+import { createSmtpMailer } from "@/lib/server/smtp";
+import { invitationEmailTemplate } from "@/lib/server/email-templates";
 import { createInvitationToken } from "@/lib/server/invitation-token";
 import { query } from "@/lib/server/db";
 
@@ -13,47 +14,8 @@ type InviteRequest = {
   invitedById?: string;
   invitedByName?: string;
   invitedByEmail?: string;
+  modulePermissions?: string[];
 };
-
-function requiredEnv(name: string) {
-  const value = process.env[name];
-
-  if (!value) {
-    throw new Error(`${name} no está configurado.`);
-  }
-
-  return value;
-}
-
-function invitationTemplate({ name, activationUrl, temporaryPassword }: { name: string; activationUrl: string; temporaryPassword: string }) {
-  return `
-    <div style="margin:0;background:#f3f8fc;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;color:#0f172a">
-      <div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #dbeafe;border-radius:10px;overflow:hidden">
-        <div style="background:#4188ef;padding:22px 28px;color:#ffffff">
-          <h1 style="margin:0;font-size:22px;line-height:1.2">Roatan Self Storage</h1>
-          <p style="margin:8px 0 0;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">Activación de cuenta</p>
-        </div>
-        <div style="padding:28px">
-          <p style="margin:0 0 16px;font-size:16px">Hola ${name},</p>
-          <p style="margin:0 0 18px;font-size:14px;line-height:1.7;color:#334155">
-            Se creó un acceso para que ingreses al dashboard administrativo. Para activar tu cuenta, confirma la contraseña temporal y define una nueva contraseña.
-          </p>
-          <div style="margin:22px 0;padding:16px;border:1px solid #bae6fd;background:#f0f9ff;border-radius:8px">
-            <p style="margin:0 0 6px;font-size:12px;font-weight:800;text-transform:uppercase;color:#0369a1">Contraseña temporal</p>
-            <p style="margin:0;font-size:20px;font-weight:800;color:#0f172a">${temporaryPassword}</p>
-          </div>
-          <a href="${activationUrl}" style="display:inline-block;background:#0ea5e9;color:#ffffff;text-decoration:none;font-weight:800;font-size:14px;padding:12px 18px;border-radius:7px">
-            Activar cuenta
-          </a>
-          <p style="margin:22px 0 0;font-size:12px;line-height:1.6;color:#64748b">
-            Si el botón no funciona, copia y pega este enlace en tu navegador:<br />
-            <span style="word-break:break-all;color:#0369a1">${activationUrl}</span>
-          </p>
-        </div>
-      </div>
-    </div>
-  `;
-}
 
 export async function POST(request: Request) {
   try {
@@ -61,6 +23,9 @@ export async function POST(request: Request) {
     const name = body.name?.trim();
     const email = body.email?.trim().toLowerCase();
     const temporaryPassword = body.temporaryPassword ?? "";
+    const modulePermissions = Array.isArray(body.modulePermissions)
+      ? [...new Set(body.modulePermissions.filter((entry) => typeof entry === "string"))]
+      : [];
 
     if (!name || !email || !temporaryPassword) {
       return NextResponse.json({ ok: false, message: "Nombre, correo y contraseña temporal son requeridos." }, { status: 400 });
@@ -68,6 +33,17 @@ export async function POST(request: Request) {
 
     if (temporaryPassword.length < 8) {
       return NextResponse.json({ ok: false, message: "La contraseña temporal debe tener al menos 8 caracteres." }, { status: 400 });
+    }
+
+    if (!modulePermissions.length) {
+      return NextResponse.json({ ok: false, message: "Selecciona al menos un módulo para el nuevo usuario." }, { status: 400 });
+    }
+
+    if (body.invitedById !== "USR-ROOT") {
+      const inviter = await query<{ can_invite: boolean }>("SELECT can_invite FROM app_users WHERE id = $1 LIMIT 1", [body.invitedById ?? ""]);
+      if (!inviter.rows[0]?.can_invite) {
+        return NextResponse.json({ ok: false, message: "Tu usuario no tiene permiso para invitar a otras personas." }, { status: 403 });
+      }
     }
 
     const existingUser = await query<{ id: string }>("SELECT id FROM app_users WHERE lower(username) = $1 LIMIT 1", [email]);
@@ -87,26 +63,16 @@ export async function POST(request: Request) {
       invitedById: body.invitedById,
       invitedByName: body.invitedByName,
       invitedByEmail: body.invitedByEmail,
+      modulePermissions,
     });
     const origin = new URL(request.url).origin;
     const activationUrl = `${origin}/activar-cuenta?token=${encodeURIComponent(token)}`;
-    const smtpUser = requiredEnv("GMAIL_EMAIL");
-    const transporter = nodemailer.createTransport({
-      host: requiredEnv("GMAIL_SMTP_HOST"),
-      port: Number(process.env.GMAIL_SMTP_PORT ?? 587),
-      secure: false,
-      auth: {
-        user: smtpUser,
-        pass: requiredEnv("GMAIL_PASSWORD").replace(/\s/g, ""),
-      },
-    });
+    const transporter = createSmtpMailer();
 
     await transporter.sendMail({
-      from: `"Roatan Self Storage" <${smtpUser}>`,
       to: email,
-      replyTo: process.env.YOUR_EMAIL ?? smtpUser,
       subject: "Activa tu cuenta - Roatan Self Storage",
-      html: invitationTemplate({ name, activationUrl, temporaryPassword }),
+      ...invitationEmailTemplate({ name, email, activationUrl, temporaryPassword }),
     });
 
     await query(
@@ -119,7 +85,9 @@ export async function POST(request: Request) {
         status,
         invited_by_id,
         invited_by_name,
-        invited_by_email
+        invited_by_email,
+        module_permissions,
+        can_invite
       ) VALUES (
         $1,
         $2,
@@ -129,7 +97,9 @@ export async function POST(request: Request) {
         'ACTIVO',
         $5,
         $6,
-        $7
+        $7,
+        $8::jsonb,
+        false
       )`,
       [
         `USR-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
@@ -139,6 +109,7 @@ export async function POST(request: Request) {
         body.invitedById ?? null,
         body.invitedByName ?? null,
         body.invitedByEmail ?? null,
+        JSON.stringify(modulePermissions),
       ],
     );
 
