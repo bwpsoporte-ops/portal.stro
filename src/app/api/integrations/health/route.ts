@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/server/db";
 import { ensureIntegrationSchema } from "@/lib/server/integrations/schema";
+import { isSmtpConfigured } from "@/lib/server/smtp";
 
 export const runtime = "nodejs";
 
@@ -21,10 +22,7 @@ export async function GET() {
       },
       payments: { configured: Boolean(process.env.PAY_PORTAL_WEBHOOK_SECRET) },
       smtp: {
-        configured: Boolean(
-          process.env.SMTP_HOST
-          && (process.env.SMTP_FROM || process.env.SMTP_USER)
-        ),
+        configured: isSmtpConfigured(),
       },
     });
   } catch {
