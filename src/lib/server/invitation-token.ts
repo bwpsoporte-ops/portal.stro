@@ -9,6 +9,7 @@ export type InvitationPayload = {
   invitedById?: string;
   invitedByName?: string;
   invitedByEmail?: string;
+  modulePermissions?: string[];
 };
 
 function getKey() {
