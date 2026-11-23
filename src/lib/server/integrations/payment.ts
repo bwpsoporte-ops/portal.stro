@@ -1,5 +1,6 @@
+
 import { randomUUID } from "node:crypto";
-import nodemailer from "nodemailer";
+import { createSmtpMailer } from "@/lib/server/smtp";
 import { getPool } from "@/lib/server/db";
 import { ensureIntegrationSchema } from "./schema";
 
@@ -113,7 +114,7 @@ export async function processPaymentNotice(notice: PaymentNotice, raw: unknown) 
 }
 
 async function sendPaymentEmail(storeganiseInvoiceId: string) {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_FROM) return;
+  const transport = createSmtpMailer();
   const db = getPool();
   const claimed = await db.query<{
     email: string; first_name: string | null; amount: string; currency: string;
@@ -129,14 +130,7 @@ async function sendPaymentEmail(storeganiseInvoiceId: string) {
   if (!claimed.rowCount) return;
   const row = claimed.rows[0];
   try {
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: process.env.SMTP_SECURE === "true",
-      auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } : undefined,
-    });
     await transport.sendMail({
-      from: process.env.SMTP_FROM,
       to: row.email,
       subject: `Pago confirmado - factura ${storeganiseInvoiceId}`,
       text: `Hola ${row.first_name ?? ""}, confirmamos su pago de ${row.currency} ${row.amount}. Referencia: ${row.payment_id}.`,
