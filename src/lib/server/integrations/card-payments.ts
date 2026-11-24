@@ -1,4 +1,4 @@
-import type { CardPaymentRow, CardPaymentStatus, CardPaymentsResponse } from "@/lib/card-payments";
+import type { CardBrand, CardPaymentRow, CardPaymentStatus, CardPaymentsResponse } from "@/lib/card-payments";
 import { getPool } from "@/lib/server/db";
 
 type Json = Record<string, unknown>;
@@ -10,6 +10,24 @@ const methodName = (value: unknown) => typeof value === "string" ? value : recor
 const cardMethods = new Set(["card", "credit card", "creditcard", "debit card", "debitcard", "tarjeta", "tarjeta de credito", "tarjeta de debito"]);
 const bacNames = new Set(["bac", "bac credomatic", "baccredomatic", "credomatic"]);
 const nonCardMethods = new Set(["cash", "efectivo", "transfer", "transferencia", "bank transfer", "banktransfer", "ach", "direct debit"]);
+
+function cardBrand(payment: Json): CardBrand | null {
+  const card = record(payment.card);
+  const method = record(payment.method ?? payment.paymentMethod);
+  // Only explicit brand metadata is read. Never infer a network from card
+  // numbers, bank names, references, notes or a generic payment method.
+  const values = [payment.cardBrand, payment.card_brand, payment.brand, payment.cardType,
+    card.brand, card.network, card.scheme, method.cardBrand, method.brand];
+  const brands = new Set<CardBrand>();
+  for (const value of values) {
+    const name = normalized(value);
+    if (name === "visa") brands.add("Visa");
+    if (["mastercard", "master card"].includes(name)) brands.add("Mastercard");
+    if (["amex", "american express", "americanexpress"].includes(name)) brands.add("American Express");
+  }
+  // Conflicting or absent metadata must not become a guessed brand.
+  return brands.size === 1 ? [...brands][0] : null;
+}
 
 function classify(payment: Json): "card" | "other" | "unknown" {
   const method = normalized(methodName(payment.method ?? payment.paymentMethod));
@@ -112,6 +130,7 @@ export async function readStoreganiseCardPayments(): Promise<CardPaymentsRespons
         currency,
         status: paymentStatus(payment, amount),
         processor: isBac ? "BAC" : "No identificado",
+        cardBrand: cardBrand(payment),
         manual: normalized(payment.type) === "manual",
         reference: reference(payment.reference),
         transactionId: reference(payment.transactionId ?? payment.transaction_id),
