@@ -1,9 +1,11 @@
 export type CardPaymentStatus = "RECORDED" | "APPROVED" | "PENDING" | "REJECTED" | "FAILED" | "CANCELLED" | "REFUNDED" | "UNKNOWN";
 
 export const cardPaymentLabels: Record<CardPaymentStatus, string> = {
-  RECORDED: "Registrado en Storeganise", APPROVED: "Aprobado", PENDING: "Pendiente",
-  REJECTED: "Rechazado", FAILED: "Fallido", CANCELLED: "Cancelado", REFUNDED: "Reembolsado", UNKNOWN: "Por verificar",
+  RECORDED: "Registrado en Storeganise", APPROVED: "Exitoso", PENDING: "Pendiente",
+  REJECTED: "Rechazado", FAILED: "Fallido", CANCELLED: "Cancelado", REFUNDED: "Reembolsado", UNKNOWN: "Estado no reconocido",
 };
+
+export type CardBrand = "Visa" | "Mastercard" | "American Express";
 
 /** Explicit public fields only. Never expose a gateway response or card object. */
 export type CardPaymentRow = {
@@ -16,6 +18,7 @@ export type CardPaymentRow = {
   currency: string;
   status: CardPaymentStatus;
   processor: "BAC" | "No identificado";
+  cardBrand: CardBrand | null;
   manual: boolean;
   reference: string | null;
   transactionId: string | null;
@@ -26,6 +29,19 @@ export type CardPaymentRow = {
   paidAt: string | null;
   receivedAt: string;
 };
+
+export function cardPaymentOrigin(payment: Pick<CardPaymentRow, "processor" | "manual">) {
+  if (payment.manual) return payment.processor === "BAC"
+    ? "BAC · registro manual en Storeganise"
+    : "Registro manual en Storeganise";
+  return payment.processor === "BAC" ? "BAC" : "Storeganise · procesador no informado";
+}
+
+export function cardPaymentResult(payment: Pick<CardPaymentRow, "status" | "manual">) {
+  if (payment.manual && payment.status === "RECORDED") return "Registrado manualmente";
+  if (payment.manual && payment.status === "APPROVED") return "Exitoso · registro manual";
+  return cardPaymentLabels[payment.status];
+}
 
 export type CardPaymentsResponse = {
   ok: true;
