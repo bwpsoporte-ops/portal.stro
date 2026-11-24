@@ -5,12 +5,13 @@ import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionButton, EmptyState, MetricCard, SelectInput, TextInput } from "@/components/ui";
 import {
-  cardPaymentDate, cardPaymentLabels, cardPaymentMoney, hondurasDate,
+  cardPaymentDate, cardPaymentLabels, cardPaymentMoney, cardPaymentOrigin, cardPaymentResult, hondurasDate,
   type CardPaymentRow, type CardPaymentsResponse, type CardPaymentStatus,
 } from "@/lib/card-payments";
 
 function statusTone(status: CardPaymentStatus) {
-  if (status === "APPROVED" || status === "RECORDED") return "green";
+  if (status === "APPROVED") return "green";
+  if (status === "RECORDED") return "blue";
   if (status === "FAILED" || status === "REJECTED") return "red";
   if (status === "PENDING" || status === "UNKNOWN") return "amber";
   if (status === "REFUNDED") return "blue";
@@ -79,7 +80,9 @@ export default function PagosBacPage() {
   }, [load]);
 
   const filtered = useMemo(() => (data?.payments ?? []).filter((payment) => {
-    const searchable = [payment.customerName, payment.customerEmail, payment.reference, payment.transactionId, payment.paymentId, payment.unitLabel, payment.processor].join(" ").toLowerCase();
+    const searchable = [payment.customerName, payment.customerEmail, payment.reference, payment.transactionId,
+      payment.paymentId, payment.unitLabel, payment.processor, payment.cardBrand,
+      cardPaymentOrigin(payment), cardPaymentResult(payment)].join(" ").toLowerCase();
     return searchable.includes(query.trim().toLowerCase())
       && (status === "TODOS" || payment.status === status)
       && (!date || hondurasDate(payment.paidAt ?? payment.createdAt) === date)
@@ -92,33 +95,30 @@ export default function PagosBacPage() {
     const pending = filtered.filter((p) => p.status === "PENDING");
     const dated = received.filter((p) => p.paidAt).sort((a, b) => b.paidAt!.localeCompare(a.paidAt!));
     return {
-      received: received.length, pending: pending.length,
+      received: received.length,
       rejected: filtered.filter((p) => p.status === "REJECTED").length,
       failed: filtered.filter((p) => p.status === "FAILED").length,
       charged: totalsByCurrency(received), pendingAmount: totalsByCurrency(pending),
       latest: dated[0] ? cardPaymentDate(dated[0].paidAt) : "Sin fecha informada",
-      review: filtered.filter((p) => p.status === "UNKNOWN").length,
     };
   }, [filtered]);
   const metric = (value: string | number) => data ? String(value) : "—";
 
   return (
     <>
-      <PageHeader title="Pagos BAC" description="Transacciones con tarjeta registradas en Storeganise: clientes, importes, referencias y relación con la factura fiscal." />
+      <PageHeader title="Pagos BAC" description="Pagos con tarjeta: clientes, procesador u origen, marca informada, resultado y factura vinculada." />
       <div className="space-y-5 p-5">
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <MetricCard label="Pagos registrados / aprobados" value={metric(metrics.received)} hint="Con tarjeta · según Storeganise" />
-          <MetricCard label="Pagos pendientes" value={metric(metrics.pending)} hint="Solo cuando Storeganise informa ese estado" />
           <MetricCard label="Pagos rechazados" value={metric(metrics.rejected)} hint="Según los registros recibidos" />
           <MetricCard label="Pagos fallidos" value={metric(metrics.failed)} hint="Según los registros recibidos" />
           <MetricCard label="Total registrado" value={metric(metrics.charged)} hint="Moneda original · sin mezclar USD y HNL" />
           <MetricCard label="Total pendiente" value={metric(metrics.pendingAmount)} hint="Según filtros · moneda original" />
           <MetricCard label="Último pago registrado" value={metric(metrics.latest)} hint="Fechas y horas de Honduras" />
-          <MetricCard label="Por verificar" value={metric(metrics.review)} hint="Estados no reconocidos · no se cuentan como aprobados" />
         </div>
 
         <section className="no-print grid gap-3 rounded-lg border border-slate-200 bg-white p-4 md:grid-cols-5">
-          <TextInput aria-label="Buscar cliente o referencia" placeholder="Cliente, correo, bodega o referencia" value={query} onChange={(event) => setQuery(event.target.value)} />
+          <TextInput aria-label="Buscar cliente, marca de tarjeta o referencia" placeholder="Cliente, bodega, tarjeta o referencia" value={query} onChange={(event) => setQuery(event.target.value)} />
           <TextInput aria-label="Buscar factura" placeholder="Factura Storeganise o fiscal" value={invoiceFilter} onChange={(event) => setInvoiceFilter(event.target.value)} />
           <SelectInput aria-label="Estado del pago" value={status} onChange={(event) => setStatus(event.target.value as CardPaymentStatus | "TODOS")}>
             <option value="TODOS">Todos los estados</option>
@@ -145,9 +145,9 @@ export default function PagosBacPage() {
             <div className="flex flex-col gap-4 xl:flex-row xl:justify-between">
               <div>
                 <div className="flex flex-wrap gap-2">
-                  <StatusBadge tone={statusTone(selected.status)}>{cardPaymentLabels[selected.status]}</StatusBadge>
-                  <StatusBadge tone="blue">Tarjeta · {selected.processor === "BAC" ? "BAC informado por Storeganise" : "Procesador no identificado"}</StatusBadge>
-                  {selected.manual ? <StatusBadge tone="slate">Registro manual en Storeganise</StatusBadge> : null}
+                  <StatusBadge tone={statusTone(selected.status)}>{cardPaymentResult(selected)}</StatusBadge>
+                  <StatusBadge tone="slate">{cardPaymentOrigin(selected)}</StatusBadge>
+                  <StatusBadge tone="blue">{selected.cardBrand ?? "Marca de tarjeta no informada"}</StatusBadge>
                 </div>
                 <h2 className="mt-3 text-lg font-black text-slate-950">{selected.customerName}</h2>
                 <p className="text-sm text-slate-600">{selected.customerEmail ?? "Sin correo informado"} · Bodega: {selected.unitLabel ?? "Sin bodega vinculada"}</p>
@@ -157,7 +157,10 @@ export default function PagosBacPage() {
             </div>
             <div className="mt-4 grid gap-4 lg:grid-cols-2">
               <div className="rounded-lg border border-sky-100 bg-sky-50/50 p-4 text-sm leading-6">
-                <p><strong>Referencia:</strong> {selected.reference ?? "No informada"}</p>
+                <p><strong>Procesador / origen:</strong> {cardPaymentOrigin(selected)}</p>
+                <p><strong>Marca de tarjeta:</strong> {selected.cardBrand ?? "No informada por Storeganise"}</p>
+                <p><strong>Resultado del pago:</strong> {cardPaymentResult(selected)}</p>
+                <p><strong>Referencia bancaria:</strong> {selected.reference ?? "No informada"}</p>
                 <p><strong>ID transacción bancaria:</strong> {selected.transactionId ?? "No informado"}</p>
                 <p><strong>ID pago Storeganise:</strong> {selected.paymentId ?? "No informado"}</p>
                 <p><strong>Factura Storeganise:</strong> {selected.invoiceId}</p>
@@ -187,16 +190,20 @@ export default function PagosBacPage() {
               <div className="overflow-x-auto">
                 <table>
                   <thead><tr>
-                    <th>ID Pago</th><th>Cliente</th><th>Correo</th><th>Monto</th><th>Estado informado</th><th>Procesador</th><th>Referencia</th><th>Transacción</th><th>Factura Storeganise</th><th>Factura fiscal</th><th>Fecha creación</th><th>Fecha pago</th><th>Acciones</th>
+                    <th>Cliente</th><th>Correo</th><th>Monto</th><th>Referencia</th><th>Transacción</th><th>Factura Storeganise</th><th>Factura fiscal</th><th>Fecha creación</th><th>Fecha pago</th><th>Acciones</th>
                   </tr></thead>
                   <tbody>{filtered.map((payment) => (
                     <tr key={payment.key}>
-                      <td className="font-mono text-xs">{payment.paymentId ?? "No informado"}</td>
                       <td className="font-bold text-slate-900">{payment.customerName}<p className="text-xs font-normal text-slate-500">Bodega: {payment.unitLabel ?? "Sin vincular"}</p></td>
                       <td>{payment.customerEmail ?? "Sin correo"}</td>
                       <td className="font-black">{cardPaymentMoney(payment.amount, payment.currency)} {payment.currency}</td>
-                      <td><StatusBadge tone={statusTone(payment.status)}>{cardPaymentLabels[payment.status]}</StatusBadge>{payment.manual ? <p className="mt-1 text-xs text-slate-500">Registro manual en Storeganise</p> : null}</td>
-                      <td>{payment.processor}</td><td>{payment.reference ?? "No informada"}</td><td>{payment.transactionId ?? "No informada"}</td>
+                      <td className="min-w-48">
+                        <p className="break-all font-mono text-xs text-slate-800">{payment.reference || payment.paymentId || "No informada"}</p>
+                        {payment.reference || payment.paymentId ? (
+                          <p className="mt-1 text-xs text-slate-500">{payment.reference ? "Referencia bancaria" : "ID pago Storeganise"}</p>
+                        ) : null}
+                      </td>
+                      <td className="min-w-44"><StatusBadge tone={statusTone(payment.status)}>{cardPaymentResult(payment)}</StatusBadge></td>
                       <td>{payment.invoiceId}</td><td className="font-mono">{payment.invoiceNumber ?? "Sin vincular"}</td>
                       <td>{cardPaymentDate(payment.createdAt)}</td><td>{cardPaymentDate(payment.paidAt)}</td>
                       <td><div className="flex min-w-64 flex-wrap gap-2">
