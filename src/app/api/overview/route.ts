@@ -18,31 +18,46 @@ export async function GET() {
         generated_invoices: number;
         sent_invoices: number;
       }>(
-        `SELECT
-           COALESCE(SUM(CASE
-             WHEN (created_at AT TIME ZONE 'America/Tegucigalpa')::date =
-                  (now() AT TIME ZONE 'America/Tegucigalpa')::date
-             THEN CASE WHEN currency='HNL' THEN total
-                       ELSE COALESCE(NULLIF(equivalent_total,0),total*NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_today_hnl,
-           COALESCE(SUM(CASE
-             WHEN (created_at AT TIME ZONE 'America/Tegucigalpa')::date =
-                  (now() AT TIME ZONE 'America/Tegucigalpa')::date
-             THEN CASE WHEN currency='USD' THEN total
-                       ELSE COALESCE(total/NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_today_usd,
-           COALESCE(SUM(CASE
-             WHEN date_trunc('month',created_at AT TIME ZONE 'America/Tegucigalpa') =
-                  date_trunc('month',now() AT TIME ZONE 'America/Tegucigalpa')
-             THEN CASE WHEN currency='HNL' THEN total
-                       ELSE COALESCE(NULLIF(equivalent_total,0),total*NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_month_hnl,
-           COALESCE(SUM(CASE
-             WHEN date_trunc('month',created_at AT TIME ZONE 'America/Tegucigalpa') =
-                  date_trunc('month',now() AT TIME ZONE 'America/Tegucigalpa')
-             THEN CASE WHEN currency='USD' THEN total
-                       ELSE COALESCE(total/NULLIF(exchange_rate,0),0) END ELSE 0 END),0)::text AS billed_month_usd,
+        `WITH limits AS (
+           SELECT
+             date_trunc('day', now() AT TIME ZONE 'America/Tegucigalpa') AS today_start,
+             date_trunc('month', now() AT TIME ZONE 'America/Tegucigalpa') AS month_start
+         ), normalized AS (
+           SELECT
+             created_at AT TIME ZONE 'America/Tegucigalpa' AS local_created_at,
+             sent_at,
+             CASE
+               WHEN UPPER(TRIM(currency))='HNL' THEN COALESCE(total,0)
+               ELSE COALESCE(NULLIF(equivalent_total,0),COALESCE(total,0)*NULLIF(exchange_rate,0),0)
+             END AS total_hnl,
+             CASE
+               WHEN UPPER(TRIM(currency))='USD' THEN COALESCE(total,0)
+               ELSE COALESCE(COALESCE(total,0)/NULLIF(exchange_rate,0),0)
+             END AS total_usd
+           FROM billing_documents
+           WHERE UPPER(TRIM(document_type))='INVOICE'
+             AND UPPER(TRIM(status))<>'CANCELLED'
+         )
+         SELECT
+           COALESCE(SUM(total_hnl) FILTER (
+             WHERE local_created_at>=limits.today_start
+               AND local_created_at<limits.today_start+INTERVAL '1 day'
+           ),0)::text AS billed_today_hnl,
+           COALESCE(SUM(total_usd) FILTER (
+             WHERE local_created_at>=limits.today_start
+               AND local_created_at<limits.today_start+INTERVAL '1 day'
+           ),0)::text AS billed_today_usd,
+           COALESCE(SUM(total_hnl) FILTER (
+             WHERE local_created_at>=limits.month_start
+               AND local_created_at<limits.month_start+INTERVAL '1 month'
+           ),0)::text AS billed_month_hnl,
+           COALESCE(SUM(total_usd) FILTER (
+             WHERE local_created_at>=limits.month_start
+               AND local_created_at<limits.month_start+INTERVAL '1 month'
+           ),0)::text AS billed_month_usd,
            COUNT(*)::integer AS generated_invoices,
            COUNT(*) FILTER (WHERE sent_at IS NOT NULL)::integer AS sent_invoices
-         FROM billing_documents
-         WHERE document_type='INVOICE' AND status<>'CANCELLED'`,
+         FROM normalized CROSS JOIN limits`,
       ),
       db.query<{
         cai: string;
@@ -66,8 +81,8 @@ export async function GET() {
       ),
       db.query(
         `SELECT id,document_number,customer_name,total,currency,status,sent_at,created_at,source,
-                CASE WHEN currency='HNL' THEN total ELSE COALESCE(NULLIF(equivalent_total,0),total*NULLIF(exchange_rate,0),0) END AS total_hnl,
-                CASE WHEN currency='USD' THEN total ELSE COALESCE(total/NULLIF(exchange_rate,0),0) END AS total_usd
+                CASE WHEN UPPER(TRIM(currency))='HNL' THEN COALESCE(total,0) ELSE COALESCE(NULLIF(equivalent_total,0),COALESCE(total,0)*NULLIF(exchange_rate,0),0) END AS total_hnl,
+                CASE WHEN UPPER(TRIM(currency))='USD' THEN COALESCE(total,0) ELSE COALESCE(COALESCE(total,0)/NULLIF(exchange_rate,0),0) END AS total_usd
          FROM billing_documents
          WHERE document_type='INVOICE' AND status<>'CANCELLED'
          ORDER BY created_at DESC LIMIT 5`,
