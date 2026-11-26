@@ -61,6 +61,61 @@ export function isStandaloneStoreganiseCharge(resource: Resource): boolean {
   });
 }
 
+// A sent invoice is not itself proof of payment. Only reconcile standalone
+// charges against the ledger on the freshly fetched Admin API invoice.
+function ledgerCents(value: unknown) {
+  const parsed = number(value);
+  if (parsed === null) return null;
+  const rounded = cents(parsed);
+  return Number.isSafeInteger(rounded) && Math.abs(parsed * 100 - rounded) < 0.000001
+    ? rounded : null;
+}
+
+function hasReversal(row: Resource) {
+  return ["deleted", "voided", "reversed", "refunded", "cancelled", "canceled",
+    "deletedAt", "voidedAt", "reversedAt", "refundedAt", "cancelledAt", "canceledAt",
+    "amountRefunded", "refundedAmount"].some((key) => {
+    const value = row[key];
+    return value != null && value !== false && value !== 0 && value !== "" && value !== "false"
+      && !(typeof value === "string" && /^0(?:\.0+)?$/.test(value));
+  });
+}
+
+export function hasSettledStoreganiseService(invoice: Resource, invoiceId: string): boolean {
+  if (invoice.id !== invoiceId || normalize(invoice.state ?? invoice.status) !== "sent"
+    || hasReversal(invoice) || !isStandaloneStoreganiseCharge(invoice)) return false;
+
+  const tags = [invoice.type, ...(Array.isArray(invoice.tags) ? invoice.tags : []),
+    ...(invoice.entries as Resource[]).flatMap((entry) => [entry.type, ...(Array.isArray(entry.tags) ? entry.tags : [])])];
+  if (tags.some((tag) => ["rent", "rental", "month", "monthly", "deposit", "movein", "moveout", "reservation",
+    "prepayment", "prorated", "credit", "refund"].includes(normalize(tag).replace(/[ _-]/g, "")))) return false;
+
+  const total = ledgerCents(invoice.total);
+  if (total === null || total <= 0 || ledgerCents(invoice.balance) !== 0
+    || ledgerCents(invoice.amountPaid) !== total
+    || (invoice.creditApplied != null && ledgerCents(invoice.creditApplied) !== 0)
+    || !Array.isArray(invoice.payments) || !invoice.payments.length) return false;
+
+  const ids = new Set<string>();
+  let received = 0;
+  for (const payment of invoice.payments) {
+    if (!payment || typeof payment !== "object" || Array.isArray(payment)) return false;
+    const row = payment as Resource;
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const paid = ledgerCents(row.amount);
+    if (!id || ids.has(id) || paid === null || paid <= 0 || hasReversal(row)) return false;
+    // Storeganise ledger entries (including manual card postings) can omit a
+    // status. If a status IS provided it must explicitly indicate settlement.
+    if ([row.state, row.status].some((state) => state != null
+      && !["paid", "approved", "succeeded", "successful", "completed", "settled", "captured"].includes(normalize(state)))) return false;
+    if (/(refund|revers|chargeback|cancel|void|credit)/i.test(String(row.type ?? ""))) return false;
+    ids.add(id);
+    received += paid;
+    if (received > total) return false;
+  }
+  return received === total;
+}
+
 function dateLabel(value: unknown) {
   if (typeof value !== "string") return "";
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(value);
