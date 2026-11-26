@@ -78,11 +78,12 @@ type InvoiceRow = {
   unit_label: string | null;
 };
 
-export async function readStoreganiseCardPayments(): Promise<CardPaymentsResponse> {
+export async function readStoreganiseCardPayments(scope: "module" | "overview-history" = "module"): Promise<CardPaymentsResponse> {
   // Read the latest authoritative invoice snapshot, NOT the event history or
   // receipts. One invoice may have rent + deposit receipts for the SAME payment.
   // Removed payments disappear after the next Storeganise invoice update.
   // No schema initializer: this endpoint must never execute migrations/writes.
+  const history = scope === "overview-history";
   const result = await getPool().query<InvoiceRow>(`
     SELECT i.storeganise_invoice_id,i.currency,i.updated_at,
            i.raw_payload->'resource'->'payments' AS payments,
@@ -94,13 +95,14 @@ export async function readStoreganiseCardPayments(): Promise<CardPaymentsRespons
     LEFT JOIN billing_documents d ON d.id=i.billing_document_id AND d.document_type='INVOICE'
     WHERE i.deleted=false AND i.storeganise_invoice_id NOT LIKE 'JOB:%'
       AND jsonb_typeof(i.raw_payload->'resource'->'payments')='array'
+      AND (NOT $1::boolean OR i.raw_payload->'resource'->'payments' <> '[]'::jsonb)
     ORDER BY i.updated_at DESC,i.storeganise_invoice_id
-    LIMIT 2001
-  `);
+    LIMIT $2
+  `, [history, history ? null : 2001]);
   const payments: CardPaymentRow[] = [];
   let unclassifiedPayments = 0;
   let invalidPayments = 0;
-  for (const invoice of result.rows.slice(0, 2000)) {
+  for (const invoice of history ? result.rows : result.rows.slice(0, 2000)) {
     const entries = Array.isArray(invoice.payments) ? invoice.payments : [];
     const seen = new Set<string>();
     for (const [index, entry] of entries.entries()) {
@@ -147,6 +149,6 @@ export async function readStoreganiseCardPayments(): Promise<CardPaymentsRespons
   return {
     ok: true, payments, fetchedAt: new Date().toISOString(),
     lastSync: result.rows[0]?.updated_at.toISOString() ?? null,
-    invoiceLimitReached: result.rows.length > 2000, unclassifiedPayments, invalidPayments,
+    invoiceLimitReached: !history && result.rows.length > 2000, unclassifiedPayments, invalidPayments,
   };
 }
