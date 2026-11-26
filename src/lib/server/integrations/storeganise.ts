@@ -4,6 +4,7 @@ import { getPool } from "@/lib/server/db";
 import { createBillingDocument } from "@/lib/server/billing";
 import {
   buildStoreganiseInvoiceLines,
+  hasSettledStoreganiseService,
   isStandaloneStoreganiseCharge,
   type StoreganiseInvoiceLine,
 } from "./storeganise-invoice-lines";
@@ -273,12 +274,11 @@ export async function processStoreganiseWebhook(payload: JsonObject, rawBody: st
     } else if (eventType.startsWith("invoice.")) {
       const invoiceId = idFrom(data, "invoiceId", "invoice_id", "id", "_id");
       if (!invoiceId) throw new Error("El webhook de factura no contiene invoiceId.");
-      const invoice = eventType === "invoice.deleted"
-        ? { ...data, invoiceId }
-        : { ...data, ...await fetchStoreganiseInvoice(invoiceId, apiUrl), invoiceId };
+      const fetched = eventType === "invoice.deleted" ? null : await fetchStoreganiseInvoice(invoiceId, apiUrl);
+      const invoice = { ...data, ...fetched, invoiceId };
       await syncInvoiceCustomer(invoice, payload, apiUrl);
       await upsertInvoice(eventType, invoice, payload);
-      if (eventType !== "invoice.deleted") await ensurePortalInvoice(invoiceId, invoice);
+      if (fetched) await ensurePortalInvoice(invoiceId, invoice, fetched);
     } else if (eventType.startsWith("unitRental.")) {
       const rentalId = idFrom(data, "unitRentalId", "unit_rental_id", "rentalId", "id", "_id");
       if (!rentalId) throw new Error("El webhook de alquiler no contiene unitRentalId.");
@@ -528,7 +528,7 @@ async function syncInvoiceFromResource(
   };
   await syncInvoiceCustomer(invoice, payload, apiUrl);
   await upsertInvoice("invoice.updated", invoice, payload);
-  return ensurePortalInvoice(invoiceId, invoice);
+  return ensurePortalInvoice(invoiceId, invoice, fetchedInvoice);
 }
 
 function roundMoney(value: number) {
@@ -584,6 +584,7 @@ async function settlePendingStoreganiseServiceInvoice(
   storeganiseInvoiceId: string,
   resource: JsonObject,
   source: { total: number; currency: string; customerId: string | null },
+  paymentConfirmed: boolean,
 ) {
   const result = await client.query<{
     id: string; total: string; currency: string; status: string;
@@ -603,7 +604,7 @@ async function settlePendingStoreganiseServiceInvoice(
   if (!result.rowCount) return null;
   const document = result.rows[0];
   if (document.status === "PAID") return { id: documentId, duplicate: true };
-  if (!storeganisePaymentConfirmed(resource, source.total)) {
+  if (!paymentConfirmed) {
     return { id: documentId, waitingForPayment: true };
   }
   if (document.status !== "PENDING_PAYMENT" || Number(document.amount_paid) !== 0
@@ -650,7 +651,9 @@ async function settlePendingStoreganiseServiceInvoice(
   return { id: documentId, paymentConfirmed: true };
 }
 
-async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonObject) {
+async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonObject, fetchedInvoice: JsonObject) {
+  // Never use a historical webhook's payment list to override the invoice state.
+  const settledService = hasSettledStoreganiseService(fetchedInvoice, storeganiseInvoiceId);
   const lockClient = await getPool().connect();
   const note = `Storeganise invoice: ${storeganiseInvoiceId}`;
   try {
@@ -669,11 +672,12 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
       portal_deposit_amount: string | null;
       portal_deposit_rental_id: string | null;
       portal_billing_version: number | null;
+      same_snapshot: boolean | null;
     }>(
       `SELECT i.billing_document_id,i.amount::text,i.currency,i.storeganise_user_id,
               i.origin_job_id,i.portal_rental_amount,i.portal_deposit_amount,
               i.portal_deposit_rental_id,i.portal_billing_version,c.id AS customer_id,
-              u.id AS unit_id,u.unit_number
+              u.id AS unit_id,u.unit_number,(i.raw_payload->'resource') = $3::jsonb AS same_snapshot
        FROM integration_invoices i
        LEFT JOIN integration_customers c ON c.storeganise_user_id=i.storeganise_user_id AND c.disabled=false
        LEFT JOIN LATERAL (
@@ -686,14 +690,19 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
        ) u ON true
        WHERE i.storeganise_invoice_id=$1 AND i.deleted=false
        FOR UPDATE OF i`,
-      [storeganiseInvoiceId, idFrom(resource, "unitId", "unit_id")],
+      [storeganiseInvoiceId, idFrom(resource, "unitId", "unit_id"), settledService ? JSON.stringify(resource) : null],
     );
     if (!linked.rowCount) throw new Error("La factura sincronizada no está disponible para crear el documento fiscal.");
     const row = linked.rows[0];
+    const total = amount(row.amount);
+    if (settledService && (!row.same_snapshot || roundMoney(amount(fetchedInvoice.total)) !== roundMoney(total))) {
+      throw new Error("El cobro de servicios cambió durante la conciliación. Reintenta para consultar el pago vigente.");
+    }
+    const paymentConfirmed = storeganisePaymentConfirmed(resource, total) || settledService;
     if (row.portal_billing_version === 1 && row.billing_document_id) {
       const settled = await settlePendingStoreganiseServiceInvoice(
         lockClient, row.billing_document_id, storeganiseInvoiceId, resource,
-        { total: amount(row.amount), currency: row.currency.toUpperCase(), customerId: row.customer_id },
+        { total, currency: row.currency.toUpperCase(), customerId: row.customer_id }, paymentConfirmed,
       );
       if (settled) {
         await lockClient.query("COMMIT");
@@ -739,11 +748,10 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
       return { id: recovered.rows[0].id, recovered: true };
     }
 
-    const total = amount(row.amount);
     // Only sent standalone charges may be issued before payment. No job,
     // rental, deposit or draft enters this exception. A positive total is NOT
     // evidence of payment: the new document remains pending, without a receipt.
-    if (!storeganisePaymentConfirmed(resource, total) && total > 0 && !row.origin_job_id
+    if (!paymentConfirmed && total > 0 && !row.origin_job_id
       && String(resource.state ?? resource.status).trim().toLowerCase() === "sent"
       && isStandaloneStoreganiseCharge(resource)) {
       if (!row.customer_id) throw new Error("El servicio todavía no tiene un cliente sincronizado.");
@@ -774,7 +782,7 @@ async function ensurePortalInvoice(storeganiseInvoiceId: string, resource: JsonO
     }
     // Rental/deposit reservations, drafts and partial payments retain their
     // existing paid-only gate and their original invoice/proforma separation.
-    if (!storeganisePaymentConfirmed(resource, total)) {
+    if (!paymentConfirmed) {
       await lockClient.query("COMMIT");
       return { waitingForPayment: true };
     }
