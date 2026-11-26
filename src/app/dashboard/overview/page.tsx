@@ -1,10 +1,20 @@
+
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge, statusTone } from "@/components/status-badge";
 import { EmptyState, MetricCard } from "@/components/ui";
-import { alerts, money, overview as integrationOverview, payments, shortDate, storeganiseEvents } from "@/lib/dashboard-data";
+import { alerts, overview as integrationOverview, shortDate, storeganiseEvents } from "@/lib/dashboard-data";
+import { cardPaymentDate, cardPaymentMoney, cardPaymentResult, type CardPaymentRow } from "@/lib/card-payments";
+
+type CardSummary = {
+  received: number;
+  approved: number;
+  invoiceLimitReached: boolean;
+  latest: Pick<CardPaymentRow, "key" | "customerName" | "amount" | "currency" | "status" | "manual" | "reference" | "paymentId" | "paidAt">[];
+};
 
 type OverviewMetrics = {
   billed_today_hnl: string;
@@ -71,6 +81,40 @@ export default function OverviewPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [cards, setCards] = useState<CardSummary | null>(null);
+  const [cardsUnavailable, setCardsUnavailable] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let busy = false;
+    async function refresh() {
+      if (busy || document.hidden || controller.signal.aborted) return;
+      busy = true;
+      try {
+        const response = await fetch("/api/overview/card-payments", {
+          cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]),
+        });
+        if (!response.ok) throw new Error("No disponible");
+        const summary: CardSummary = await response.json();
+        if (!controller.signal.aborted) {
+          setCards(summary);
+          setCardsUnavailable(false);
+        }
+      } catch {
+        if (!controller.signal.aborted) setCardsUnavailable(true);
+      } finally {
+        busy = false;
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(refresh, 30000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
 
   const load = useCallback(async () => {
     const response = await fetch("/api/overview", { cache: "no-store" });
@@ -102,7 +146,7 @@ export default function OverviewPage() {
     <>
       <PageHeader
         title="Overview"
-        description="Vista general sincronizada con facturación, Caja y CAI / Correlativos. BAC y Storeganise permanecen preparados para su integración."
+        description="Vista general de facturación, Caja, CAI / Correlativos y pagos con tarjeta recibidos de Storeganise."
       />
       <div className="space-y-5 p-5">
         {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-700">{error}</div> : null}
@@ -110,8 +154,11 @@ export default function OverviewPage() {
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Total facturado hoy" value={hnlMoney(Number(metrics.billed_today_hnl))} hint={`${usdMoney(Number(metrics.billed_today_usd))} USD · referencia`} />
           <MetricCard label="Total facturado del mes" value={hnlMoney(Number(metrics.billed_month_hnl))} hint={`${usdMoney(Number(metrics.billed_month_usd))} USD · referencia`} />
-          <MetricCard label="Pagos BAC aprobados" value={String(integrationOverview.approvedPayments)} hint="Conectado de conexión BAC" />
-          <MetricCard label="Pagos BAC pendientes" value={String(integrationOverview.pendingPayments)} hint="Conectado de conexión BAC" />
+          <Link href="/dashboard/pagos-bac" className="rounded-lg focus-visible:outline-2 focus-visible:outline-sky-600" aria-label="Ver pagos con tarjeta en Pagos BAC">
+            <MetricCard label="Pagos BAC · tarjetas recibidas" value={cards ? String(cards.received) : "—"}
+              hint={cardsUnavailable ? (cards ? "Última consulta disponible · sin actualizar" : "Consulta no disponible")
+                : cards ? `${cards.approved} aprobados · ${cards.received - cards.approved} registrados sin aprobación informada` : "Consultando Storeganise…"} />
+          </Link>
           <MetricCard label="Facturas generadas" value={String(metrics.generated_invoices)} hint="Facturas fiscales vigentes" />
           <MetricCard label="Facturas enviadas" value={String(metrics.sent_invoices)} hint="Envíos reales registrados" />
           <MetricCard label="Correlativos disponibles" value={String(fiscal?.available ?? 0)} hint={fiscal?.cai ?? "Sin CAI activo"} />
@@ -138,8 +185,28 @@ export default function OverviewPage() {
 
         <div className="grid gap-5 xl:grid-cols-3">
           <section className="rounded-lg border border-slate-200 bg-white xl:col-span-2">
-            <div className="border-b border-slate-200 p-4"><h2 className="font-black text-slate-950">Últimos pagos BAC</h2><p className="mt-1 text-xs text-emerald-700">Integración BAC conectada</p></div>
-            <div className="overflow-x-auto"><table><thead><tr><th>Cliente</th><th>Monto</th><th>Estado</th><th>Referencia</th><th>Fecha</th></tr></thead><tbody>{payments.slice(0, 5).map((payment) => <tr key={payment.id}><td>{payment.client}</td><td className="font-bold">{money(payment.amount)}</td><td><StatusBadge tone={statusTone(payment.status)}>{payment.status}</StatusBadge></td><td>{payment.bacReference}</td><td>{shortDate(payment.paidAt)}</td></tr>)}</tbody></table></div>
+            <div className="border-b border-slate-200 p-4">
+              <h2 className="font-black text-slate-950">Últimos pagos BAC</h2>
+              <p className="mt-1 text-xs text-slate-600">Pagos con tarjeta registrados en Storeganise · <Link className="underline" href="/dashboard/pagos-bac">Ver todos</Link></p>
+              {cards?.invoiceLimitReached && <p className="mt-1 text-xs text-amber-700">El conteo corresponde a las últimas 2,000 facturas consultadas.</p>}
+              {cardsUnavailable && <p role="status" className="mt-1 text-xs text-amber-700">{cards ? "No se pudo actualizar. Se muestra la última consulta disponible." : "No se pudieron consultar los pagos."}</p>}
+            </div>
+            {cards?.latest.length ? (
+              <div className="overflow-x-auto">
+                <table>
+                  <thead><tr><th>Cliente</th><th>Monto</th><th>Estado</th><th>Referencia</th><th>Fecha de pago</th></tr></thead>
+                  <tbody>{cards.latest.map((payment) => (
+                    <tr key={payment.key}>
+                      <td>{payment.customerName}</td>
+                      <td className="font-bold">{cardPaymentMoney(payment.amount, payment.currency)}</td>
+                      <td><StatusBadge tone={payment.status === "APPROVED" ? "green" : "blue"}>{cardPaymentResult(payment)}</StatusBadge></td>
+                      <td>{payment.reference ?? (payment.paymentId ? `ID pago: ${payment.paymentId}` : "No informada")}</td>
+                      <td>{cardPaymentDate(payment.paidAt)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : !cardsUnavailable && <div className="p-4"><EmptyState text={cards ? "No hay pagos con tarjeta registrados o aprobados." : "Consultando pagos con tarjeta…"} /></div>}
           </section>
 
           <section className="rounded-lg border border-slate-200 bg-white">
@@ -156,7 +223,7 @@ export default function OverviewPage() {
         </section>
 
         <section className="rounded-lg border border-slate-200 bg-white">
-          <div className="border-b border-slate-200 p-4"><h2 className="font-black text-slate-950">Alertas críticas</h2><p className="mt-1 text-xs text-emerald-900">Conectado Storeganise</p></div>
+          <div className="border-b border-slate-200 p-4"><h2 className="font-black text-slate-950">Alertas críticas</h2><p className="mt-1 text-xs text-amber-700">Se conservarán hasta conectar Storeganise</p></div>
           {!criticalAlerts.length ? <div className="p-4"><EmptyState text="No hay alertas críticas pendientes." /></div> : <div className="divide-y divide-slate-200">{criticalAlerts.map((alert) => <div key={alert.id} className="flex flex-col gap-2 p-4 md:flex-row md:items-center md:justify-between"><div><p className="font-bold text-slate-950">{alert.title}</p><p className="text-sm text-slate-500">{alert.message}</p></div><StatusBadge tone={statusTone(alert.level)}>{alert.level}</StatusBadge></div>)}</div>}
         </section>
       </div>
